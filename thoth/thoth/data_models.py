@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import (
     create_engine,
+    BigInteger,
     Boolean,
     Column,
     Integer,
@@ -18,11 +19,17 @@ Base = declarative_base()
 class Player(Base):
     __tablename__ = "players"
 
-    # OGame player ID is the primary key
     ogame_id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
 
     planets = relationship("Planet", back_populates="player")
+    latest_report_api_key = relationship(
+        "ReportAPIKey",
+        uselist=False,
+        primaryjoin="Player.ogame_id==ReportAPIKey.ogame_id",
+        order_by="ReportAPIKey.created_at.desc()",
+        viewonly=True,
+    )
 
 
 class Planet(Base):
@@ -48,6 +55,28 @@ class Planet(Base):
         return self.manual_edit is not None and self.manual_edit >= (
             datetime.utcnow() - timedelta(days=7)
         )
+
+
+class DiscordUser(Base):
+    __tablename__ = "discord_users"
+
+    discord_id = Column(BigInteger, primary_key=True)
+    ogame_id = Column(
+        Integer,
+        ForeignKey("players.ogame_id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+    )
+
+    player = relationship("Player", uselist=False)
+
+
+class ReportAPIKey(Base):
+    __tablename__ = "report_api_keys"
+
+    report_api_key = Column(String, primary_key=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    ogame_id = Column(Integer, ForeignKey("players.ogame_id"), nullable=False)
 
 
 engine = create_engine("sqlite:///ogame_players.db")

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 
 import discord
 import requests
@@ -38,53 +39,15 @@ def get_player_id(player_name, refresh=True):
     return player_model.ogame_id
 
 
-def parse_coords(coords: str):
-    g, s, p = coords.split(":")
-    return int(g), int(s), int(p)
-
-
-@dataclass
-class OgamePlayer:
-    db_data: data_models.Player
-    rank: int
-    alliance: str
-
-    def to_discord_embed(self) -> discord.Embed:
-        embed = discord.Embed(
-            title=f"OGame Player: {self.db_data.name}",
-            color=discord.Color.blue(),
+def add_report_api_key(ogame_id, report_api_key):
+    with data_models.Session() as session:
+        key_model = data_models.ReportAPIKey(
+            report_api_key=report_api_key,
+            created_at=datetime.utcnow(),
+            ogame_id=ogame_id,
         )
-
-        embed.add_field(name="Overall Rank", value=self.rank, inline=True)
-        embed.add_field(
-            name="Alliance", value=self.alliance or "None", inline=True
-        )
-
-        planets_sorted = sorted(
-            self.db_data.planets,
-            key=lambda pl: (pl.galaxy, pl.system, pl.position),
-        )
-        active_planets = [
-            f"{(pl.name or 'Colony')} `{pl.coords_str()}`"
-            f"{' 🌙' if pl.has_moon else ''}"
-            for pl in planets_sorted
-            if not pl.destroyed
-        ]
-        destroyed_planets = [
-            f"`{pl.coords_str()}`" for pl in planets_sorted if pl.destroyed
-        ]
-        embed.add_field(
-            name="Planets",
-            value="\n".join(active_planets),
-            inline=False,
-        )
-        if destroyed_planets:
-            embed.add_field(
-                name="Destroyed Planets",
-                value="\n".join(destroyed_planets),
-                inline=False,
-            )
-        return embed
+        session.add(key_model)
+        session.commit()
 
 
 def sync_planets(player_id, planets):
@@ -94,7 +57,9 @@ def sync_planets(player_id, planets):
     with data_models.Session() as session:
         for planet in planets:
             attrs = planet.get("@attributes", {})
-            galaxy, system, position = parse_coords(attrs.get("coords"))
+            galaxy, system, position = [
+                int(x) for x in attrs.get("coords").split(":")
+            ]
             has_moon = "moon" in planet
             planet_name = attrs.get("name")
 
@@ -138,19 +103,71 @@ def sync_planets(player_id, planets):
         session.commit()
 
 
-def get_player_info(player_id):
-    details_url = "https://s256-us.ogame.gameforge.com/api/playerData.xml"
+@dataclass
+class OgamePlayer:
+    db_data: data_models.Player
+    rank: int
+    alliance: str
 
+    def to_discord_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title=f"OGame Player: {self.db_data.name}",
+            color=discord.Color.blue(),
+        )
+        embed.add_field(name="Overall Rank", value=self.rank, inline=True)
+        embed.add_field(
+            name="Alliance", value=self.alliance or "None", inline=True
+        )
+
+        planets_sorted = sorted(
+            self.db_data.planets,
+            key=lambda pl: (pl.galaxy, pl.system, pl.position),
+        )
+        active_planets = [
+            f"{(pl.name or 'Colony')} `{pl.coords_str()}`"
+            f"{' 🌙' if pl.has_moon else ''}"
+            for pl in planets_sorted
+            if not pl.destroyed
+        ]
+        destroyed_planets = [
+            f"`{pl.coords_str()}`" for pl in planets_sorted if pl.destroyed
+        ]
+
+        embed.add_field(
+            name="Planets",
+            value="\n".join(active_planets),
+            inline=False,
+        )
+        if destroyed_planets:
+            embed.add_field(
+                name="Destroyed Planets",
+                value="\n".join(destroyed_planets),
+                inline=False,
+            )
+
+        if self.db_data.latest_report_api_key:
+            embed.add_field(
+                name="Latest Report API Key",
+                value=self.db_data.latest_report_api_key.report_api_key,
+                inline=False,
+            )
+
+        return embed
+
+
+def get_player_info(ogame_id):
+    details_url = "https://s256-us.ogame.gameforge.com/api/playerData.xml"
     resp = requests.get(
-        details_url, params={"id": player_id, "toJson": 1}, timeout=10
+        details_url, params={"id": ogame_id, "toJson": 1}, timeout=10
     )
     resp.raise_for_status()
     player_data = resp.json()
 
-    sync_planets(player_id, player_data["planets"]["planet"])
+    sync_planets(ogame_id, player_data["planets"]["planet"])
     with data_models.Session() as session:
-        player_model = session.get(data_models.Player, player_id)
+        player_model = session.get(data_models.Player, ogame_id)
         _ = player_model.planets
+        _ = player_model.latest_report_api_key
         session.expunge(player_model)
 
     return OgamePlayer(
