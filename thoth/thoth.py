@@ -126,13 +126,25 @@ async def unlink_discord(
     player_name="OGame player or mention", api_key="Report API key"
 )
 async def add_key(
-    interaction: discord.Interaction, player_name: str, api_key: str
+    interaction: discord.Interaction, api_key: str, player_name: str = None
 ):
-    if not (ogame_id := await resolve_ogame_id(interaction, player_name)):
-        return
-    ogame_api.add_report_api_key(ogame_id, api_key)
+    if api_key.startswith("sr-"):
+        ogame_api.parse_ogame_sr(api_key)
+    else:
+        if player_name:
+            ogame_id = await resolve_ogame_id(interaction, player_name)
+        if not ogame_id and (sender_id := interaction.user.id):
+            ogame_id = await ogame_api.get_linked_ogame_id(sender_id)
+        if not ogame_id:
+            await interaction.response.send_message(
+                "❌ Could not determine OGame player to add the key for."
+            )
+            return
+        ogame_api.parse_battlesim_api(api_key, ogame_id)
+
     await interaction.response.send_message(
-        f"✅ Added Report API key for **{player_name}**."
+        "✅ Added Report API key for "
+        f"**{ogame_api.get_player_name_from_api_key(api_key)}**."
     )
 
 

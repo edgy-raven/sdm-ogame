@@ -26,13 +26,13 @@ PEACEFUL_SHIPS = {202, 203, 208, 210, 212, 217, 216, 220}
 
 
 def save_fleet_and_techs(
-    report_api_key_str, defender_id, ships, techs, source, created_at
+    report_api_key_str, player_id, ships, techs, source, created_at
 ):
     with data_models.Session() as session:
         api_key_row = data_models.ReportAPIKey(
             report_api_key=report_api_key_str,
             created_at=created_at,
-            ogame_id=defender_id,
+            ogame_id=player_id,
             source=source,
         )
         api_key_row = session.merge(api_key_row)
@@ -62,7 +62,7 @@ def parse_battlesim_api(battlesim_api_key, player_id):
 
     return save_fleet_and_techs(
         report_api_key_str=battlesim_api_key,
-        defender_id=player_id,
+        player_id=player_id,
         ships=fleet_and_techs["ships"],
         techs=fleet_and_techs["techs"],
         source="BattleSim",
@@ -70,8 +70,8 @@ def parse_battlesim_api(battlesim_api_key, player_id):
     )
 
 
-def parse_ogame_sr(api_key_str):
-    response = requests.get(f"https://ogapi.faw-kes.de/v1/report/{api_key_str}")
+def parse_ogame_sr(sr_api_key):
+    response = requests.get(f"https://ogapi.faw-kes.de/v1/report/{sr_api_key}")
     response.raise_for_status()
     data = response.json()["RESULT_DATA"]
 
@@ -85,8 +85,8 @@ def parse_ogame_sr(api_key_str):
         tech["research_type"]: tech["level"] for tech in content["research"]
     }
     return save_fleet_and_techs(
-        report_api_key_str=api_key_str,
-        defender_id=defender_id,
+        report_api_key_str=sr_api_key,
+        player_id=defender_id,
         ships=ships,
         techs=techs,
         source="Ogame",
@@ -126,15 +126,11 @@ def get_player_id(player_name, refresh=True):
     return player_model.ogame_id
 
 
-def add_report_api_key(ogame_id, report_api_key):
+def get_player_name_from_api_key(api_key):
     with data_models.Session() as session:
-        key_model = data_models.ReportAPIKey(
-            report_api_key=report_api_key,
-            created_at=datetime.utcnow(),
-            ogame_id=ogame_id,
-        )
-        session.add(key_model)
-        session.commit()
+        api_key_model = session.get(data_models.ReportAPIKey, api_key)
+        player = session.get(data_models.Player, api_key_model.ogame_id)
+        return player.name
 
 
 def sync_planets(player_id, planets):
