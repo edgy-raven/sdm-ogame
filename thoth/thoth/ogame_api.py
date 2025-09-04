@@ -1,10 +1,39 @@
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
+import xml.etree.ElementTree as ET
 
 import discord
 import requests
 
 from thoth import data_models
+
+
+@lru_cache()
+def get_ogame_localization_xml():
+    response = requests.get(
+        "https://s256-us.ogame.gameforge.com/api/localization.xml"
+    )
+    response.raise_for_status()
+
+    return {
+        int(elem.attrib["id"]): elem.text
+        for elem in ET.fromstring(response.content).findall(".//techs/name")
+    }
+
+
+def parse_fleet_and_techs(battlesim_api_key):
+    fleet_and_techs = {"techs": {}, "ships": {}}
+
+    for part in battlesim_api_key.split("|"):
+        key_str, value_str = part.split(";")
+        if not key_str.isdigit():
+            continue
+        key_id = int(key_str)
+        category = "techs" if key_id < 200 else "ships"
+        fleet_and_techs[category][key_id] = int(value_str)
+
+    return fleet_and_techs
 
 
 def bulk_update_players():
@@ -108,47 +137,93 @@ class OgamePlayer:
     db_data: data_models.Player
     rank: int
     alliance: str
+    fleet_and_techs: dict | None = None
 
-    def to_discord_embed(self) -> discord.Embed:
+    def _add_tech_fields(self, embed, id_to_name):
+        techs = {
+            id_to_name[k]: v
+            for k, v in sorted(self.fleet_and_techs["techs"].items())
+        }
+        drives = (
+            f"Combustion: {techs['Combustion Drive']}\n"
+            f"Impulse: {techs['Impulse Drive']}\n"
+            f"Hyperspace: {techs['Hyperspace Drive']}"
+        )
+        weapons = (
+            f"Weapons: {techs['Weapons Technology']}\n"
+            f"Shields: {techs['Shielding Technology']}\n"
+            f"Armor: {techs['Armor Technology']}"
+        )
+        embed.add_field(name="Drives", value=drives, inline=True)
+        embed.add_field(name="Weapons", value=weapons, inline=True)
+
+    def _add_planet_fields(self, embed):
+        planets = sorted(
+            self.db_data.planets,
+            key=lambda pl: (pl.galaxy, pl.system, pl.position),
+        )
+        active = [
+            f"{(pl.name or 'Colony')} `{pl.coords_str()}`"
+            f"{' 🌙' if pl.has_moon else ''}"
+            for pl in planets
+            if not pl.destroyed
+        ]
+        destroyed = [f"`{pl.coords_str()}`" for pl in planets if pl.destroyed]
+        embed.add_field(name="Planets", value="\n".join(active), inline=False)
+        if destroyed:
+            embed.add_field(
+                name="Destroyed Planets",
+                value="\n".join(destroyed),
+                inline=False,
+            )
+
+    def _add_ship_fields(self, embed, id_to_name):
+        ships = {
+            id_to_name[k]: v for k, v in self.fleet_and_techs["ships"].items()
+        }
+        ship_list = [f"{n}: {c}" for n, c in sorted(ships.items()) if c > 0]
+        if ship_list:
+            if len(ship_list) > 10:
+                half = (len(ship_list) + 1) // 2
+                embed.add_field(
+                    name="Ships",
+                    value="\n".join(ship_list[:half]),
+                    inline=True,
+                )
+                embed.add_field(
+                    name="\u200b",
+                    value="\n".join(ship_list[half:]),
+                    inline=True,
+                )
+            else:
+                embed.add_field(
+                    name="Ships", value="\n".join(ship_list), inline=False
+                )
+
+    def to_discord_embed(self):
+        id_to_name = get_ogame_localization_xml()
         embed = discord.Embed(
             title=f"OGame Player: {self.db_data.name}",
             color=discord.Color.blue(),
         )
-        embed.add_field(name="Overall Rank", value=self.rank, inline=True)
+
+        embed.add_field(name="Overall Rank", value=self.rank, inline=False)
         embed.add_field(
-            name="Alliance", value=self.alliance or "None", inline=True
+            name="Alliance", value=self.alliance or "None", inline=False
         )
 
-        planets_sorted = sorted(
-            self.db_data.planets,
-            key=lambda pl: (pl.galaxy, pl.system, pl.position),
-        )
-        active_planets = [
-            f"{(pl.name or 'Colony')} `{pl.coords_str()}`"
-            f"{' 🌙' if pl.has_moon else ''}"
-            for pl in planets_sorted
-            if not pl.destroyed
-        ]
-        destroyed_planets = [
-            f"`{pl.coords_str()}`" for pl in planets_sorted if pl.destroyed
-        ]
+        if self.fleet_and_techs:
+            self._add_tech_fields(embed, id_to_name)
 
-        embed.add_field(
-            name="Planets",
-            value="\n".join(active_planets),
-            inline=False,
-        )
-        if destroyed_planets:
-            embed.add_field(
-                name="Destroyed Planets",
-                value="\n".join(destroyed_planets),
-                inline=False,
-            )
+        self._add_planet_fields(embed)
 
-        if self.db_data.latest_report_api_key:
+        if self.fleet_and_techs:
+            self._add_ship_fields(embed, id_to_name)
+
+        if key_model := self.db_data.latest_report_api_key:
             embed.add_field(
                 name="Latest Report API Key",
-                value=self.db_data.latest_report_api_key.report_api_key,
+                value=key_model.report_api_key,
                 inline=False,
             )
 
@@ -170,8 +245,15 @@ def get_player_info(ogame_id):
         _ = player_model.latest_report_api_key
         session.expunge(player_model)
 
+    key_model = player_model.latest_report_api_key
+    if key_model is None or key_model.report_api_key.startswith("sr-"):
+        fleet_and_techs = None
+    else:
+        fleet_and_techs = parse_fleet_and_techs(key_model.report_api_key)
+
     return OgamePlayer(
         db_data=player_model,
         rank=player_data.get("positions", {}).get("position", [])[0],
         alliance=player_data.get("alliance", {}).get("name", "None"),
+        fleet_and_techs=fleet_and_techs,
     )
