@@ -1,6 +1,6 @@
 from dataclasses import dataclass
-from datetime import datetime
-from functools import lru_cache
+from datetime import datetime, timedelta
+from functools import lru_cache, cached_property
 import xml.etree.ElementTree as ET
 
 import discord
@@ -22,7 +22,34 @@ def get_ogame_localization_xml():
     }
 
 
-def parse_fleet_and_techs(battlesim_api_key):
+PEACEFUL_SHIPS = {202, 203, 208, 210, 212, 217, 216, 220}
+
+
+def save_fleet_and_techs(
+    report_api_key_str, defender_id, ships, techs, source, created_at
+):
+    with data_models.Session() as session:
+        api_key_row = data_models.ReportAPIKey(
+            report_api_key=report_api_key_str,
+            created_at=created_at,
+            ogame_id=defender_id,
+            source=source,
+        )
+        api_key_row = session.merge(api_key_row)
+
+        api_key_row.ships.extend(
+            data_models.FleetShip(ship_type=stype, count=count)
+            for stype, count in ships.items()
+            if stype not in PEACEFUL_SHIPS
+        )
+        api_key_row.techs.extend(
+            data_models.FleetTech(tech_type=ttype, level=level)
+            for ttype, level in techs.items()
+        )
+        session.commit()
+
+
+def parse_battlesim_api(battlesim_api_key, player_id):
     fleet_and_techs = {"techs": {}, "ships": {}}
 
     for part in battlesim_api_key.split("|"):
@@ -33,7 +60,38 @@ def parse_fleet_and_techs(battlesim_api_key):
         category = "techs" if key_id < 200 else "ships"
         fleet_and_techs[category][key_id] = int(value_str)
 
-    return fleet_and_techs
+    return save_fleet_and_techs(
+        report_api_key_str=battlesim_api_key,
+        defender_id=player_id,
+        ships=fleet_and_techs["ships"],
+        techs=fleet_and_techs["techs"],
+        source="BattleSim",
+        created_at=datetime.utcnow(),
+    )
+
+
+def parse_ogame_sr(api_key_str):
+    response = requests.get(f"https://ogapi.faw-kes.de/v1/report/{api_key_str}")
+    response.raise_for_status()
+    data = response.json()["RESULT_DATA"]
+
+    generic = data["generic"]
+    defender_id = generic["defender_user_id"]
+    created_at = datetime.utcfromtimestamp(generic["event_timestamp"])
+
+    content = data["details"]
+    ships = {ship["ship_type"]: ship["count"] for ship in content["ships"]}
+    techs = {
+        tech["research_type"]: tech["level"] for tech in content["research"]
+    }
+    return save_fleet_and_techs(
+        report_api_key_str=api_key_str,
+        defender_id=defender_id,
+        ships=ships,
+        techs=techs,
+        source="Ogame",
+        created_at=created_at,
+    )
 
 
 def bulk_update_players():
@@ -137,22 +195,30 @@ class OgamePlayer:
     db_data: data_models.Player
     rank: int
     alliance: str
-    fleet_and_techs: dict | None = None
+    best_report_api_key_model: data_models.ReportAPIKey | None = None
+
+    @cached_property
+    def fleet_and_techs(self):
+        if not self.best_report_api_key_model:
+            return None
+        return self.best_report_api_key_model.fleet_and_tech_dict()
 
     def _add_tech_fields(self, embed, id_to_name):
+        if not self.fleet_and_techs:
+            return
         techs = {
             id_to_name[k]: v
             for k, v in sorted(self.fleet_and_techs["techs"].items())
         }
         drives = (
-            f"Combustion: {techs['Combustion Drive']}\n"
-            f"Impulse: {techs['Impulse Drive']}\n"
-            f"Hyperspace: {techs['Hyperspace Drive']}"
+            f"Combustion: {techs.get('Combustion Drive', 0)}\n"
+            f"Impulse: {techs.get('Impulse Drive', 0)}\n"
+            f"Hyperspace: {techs.get('Hyperspace Drive', 0)}"
         )
         weapons = (
-            f"Weapons: {techs['Weapons Technology']}\n"
-            f"Shields: {techs['Shielding Technology']}\n"
-            f"Armor: {techs['Armor Technology']}"
+            f"Weapons: {techs.get('Weapons Technology', 0)}\n"
+            f"Shields: {techs.get('Shielding Technology', 0)}\n"
+            f"Armor: {techs.get('Armor Technology', 0)}"
         )
         embed.add_field(name="Drives", value=drives, inline=True)
         embed.add_field(name="Weapons", value=weapons, inline=True)
@@ -178,12 +244,15 @@ class OgamePlayer:
             )
 
     def _add_ship_fields(self, embed, id_to_name):
+        if not self.fleet_and_techs:
+            return
+
         ships = {
             id_to_name[k]: v for k, v in self.fleet_and_techs["ships"].items()
         }
         ship_list = [f"{n}: {c}" for n, c in sorted(ships.items()) if c > 0]
         if ship_list:
-            if len(ship_list) > 10:
+            if len(ship_list) > 5:
                 half = (len(ship_list) + 1) // 2
                 embed.add_field(
                     name="Ships",
@@ -212,22 +281,41 @@ class OgamePlayer:
             name="Alliance", value=self.alliance or "None", inline=False
         )
 
-        if self.fleet_and_techs:
-            self._add_tech_fields(embed, id_to_name)
-
-        self._add_planet_fields(embed)
-
-        if self.fleet_and_techs:
-            self._add_ship_fields(embed, id_to_name)
-
-        if key_model := self.db_data.latest_report_api_key:
+        if self.best_report_api_key_model:
             embed.add_field(
                 name="Latest Report API Key",
-                value=key_model.report_api_key,
+                value=f"{self.best_report_api_key_model.report_api_key}\n\n"
+                "**Retrieved on**: "
+                f"{self.best_report_api_key_model.timestamp_display_text()}",
                 inline=False,
             )
+        self._add_tech_fields(embed, id_to_name)
+        self._add_planet_fields(embed)
+        self._add_ship_fields(embed, id_to_name)
 
         return embed
+
+
+def get_best_api_key(player_model):
+    if battle_sim_keys := [
+        k
+        for k in player_model.report_api_keys
+        if k.source == "BattleSim"
+        and k.created_at >= datetime.utcnow() - timedelta(days=7)
+    ]:
+        return max(battle_sim_keys, key=lambda k: k.created_at)
+    if not (
+        ogame_keys := [
+            k for k in player_model.report_api_keys if k.source == "Ogame"
+        ]
+    ):
+        return None
+
+    totals = [(k, sum(s.count for s in k.ships)) for k in ogame_keys]
+    threshold = max(total for _, total in totals) * 0.8
+    eligible = [k for k, total in totals if total >= threshold]
+
+    return max(eligible or ogame_keys, key=lambda k: k.created_at)
 
 
 def get_player_info(ogame_id):
@@ -242,18 +330,17 @@ def get_player_info(ogame_id):
     with data_models.Session() as session:
         player_model = session.get(data_models.Player, ogame_id)
         _ = player_model.planets
-        _ = player_model.latest_report_api_key
-        session.expunge(player_model)
 
-    key_model = player_model.latest_report_api_key
-    if key_model is None or key_model.report_api_key.startswith("sr-"):
-        fleet_and_techs = None
-    else:
-        fleet_and_techs = parse_fleet_and_techs(key_model.report_api_key)
+        best_report_api_key_model = get_best_api_key(player_model)
+        if best_report_api_key_model:
+            _ = best_report_api_key_model.ships
+            _ = best_report_api_key_model.techs
+            session.expunge(best_report_api_key_model)
+        session.expunge(player_model)
 
     return OgamePlayer(
         db_data=player_model,
         rank=player_data.get("positions", {}).get("position", [])[0],
         alliance=player_data.get("alliance", {}).get("name", "None"),
-        fleet_and_techs=fleet_and_techs,
+        best_report_api_key_model=best_report_api_key_model,
     )

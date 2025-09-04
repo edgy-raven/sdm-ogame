@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import (
     create_engine,
@@ -23,13 +23,7 @@ class Player(Base):
     name = Column(String, nullable=False)
 
     planets = relationship("Planet", back_populates="player")
-    latest_report_api_key = relationship(
-        "ReportAPIKey",
-        uselist=False,
-        primaryjoin="Player.ogame_id==ReportAPIKey.ogame_id",
-        order_by="ReportAPIKey.created_at.desc()",
-        viewonly=True,
-    )
+    report_api_keys = relationship("ReportAPIKey")
 
 
 class Planet(Base):
@@ -77,6 +71,56 @@ class ReportAPIKey(Base):
     report_api_key = Column(String, primary_key=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     ogame_id = Column(Integer, ForeignKey("players.ogame_id"), nullable=False)
+    source = Column(String, nullable=False)
+
+    ships = relationship("FleetShip", cascade="all, delete-orphan")
+    techs = relationship("FleetTech", cascade="all, delete-orphan")
+
+    def fleet_and_tech_dict(self):
+        return {
+            "ships": {ship.ship_type: ship.count for ship in self.ships},
+            "techs": {tech.tech_type: tech.level for tech in self.techs},
+        }
+
+    def timestamp_display_text(self):
+        created_at_utc = self.created_at.replace(tzinfo=timezone.utc)
+        seconds = int(
+            (datetime.now(timezone.utc) - created_at_utc).total_seconds()
+        )
+
+        if seconds < 60:
+            ago = f"{seconds} seconds ago"
+        elif seconds < 3600:
+            minutes = seconds // 60
+            ago = f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+        elif seconds < 86400:
+            hours = seconds // 3600
+            ago = f"{hours} hour{'s' if hours != 1 else ''} ago"
+        else:
+            days = seconds // 86400
+            ago = f"{days} day{'s' if days != 1 else ''} ago"
+
+        return f"{created_at_utc:%Y-%m-%d %H:%M:%S UTC} ({ago})"
+
+
+class FleetShip(Base):
+    __tablename__ = "fleet_ships"
+
+    report_api_key = Column(
+        String, ForeignKey("report_api_keys.report_api_key"), primary_key=True
+    )
+    ship_type = Column(Integer, primary_key=True)
+    count = Column(Integer, nullable=False)
+
+
+class FleetTech(Base):
+    __tablename__ = "fleet_techs"
+
+    report_api_key = Column(
+        String, ForeignKey("report_api_keys.report_api_key"), primary_key=True
+    )
+    tech_type = Column(Integer, primary_key=True)
+    level = Column(Integer, nullable=False)
 
 
 engine = create_engine("sqlite:///ogame_players.db")
