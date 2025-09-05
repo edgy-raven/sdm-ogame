@@ -25,49 +25,56 @@ def get_ogame_localization_xml():
 PEACEFUL_SHIPS = {202, 203, 208, 210, 212, 217, 216, 220}
 
 
-def save_fleet_and_techs(
-    report_api_key_str, player_id, ships, techs, source, created_at
+class DuplicateKeyException(Exception):
+    pass
+
+
+def save_report_with_coords(
+    report_api_key_str,
+    player_id,
+    ships,
+    techs,
+    source,
+    created_at,
+    coord_str,
+    from_moon=False,
 ):
     with data_models.Session() as session:
-        api_key_row = data_models.ReportAPIKey(
+        if session.get(data_models.ReportAPIKey, report_api_key_str):
+            raise DuplicateKeyException(
+                f"Report API key '{report_api_key_str}' already exists."
+            )
+
+        report = data_models.ReportAPIKey(
             report_api_key=report_api_key_str,
             created_at=created_at,
             ogame_id=player_id,
             source=source,
+            from_moon=from_moon,
         )
-        api_key_row = session.merge(api_key_row)
-
-        api_key_row.ships.extend(
+        report.set_coords(coord_str)
+        report.ships.extend(
             data_models.FleetShip(ship_type=stype, count=count)
             for stype, count in ships.items()
             if stype not in PEACEFUL_SHIPS
         )
-        api_key_row.techs.extend(
+        report.techs.extend(
             data_models.FleetTech(tech_type=ttype, level=level)
             for ttype, level in techs.items()
         )
+        report = session.merge(report)
+        session.flush()
+
+        if not (planet := report.planet):
+            planet = data_models.Planet(
+                ogame_id=player_id, has_moon=from_moon, manual_edit=created_at
+            )
+            planet.set_coords(coord_str)
+            session.add(planet)
+        elif from_moon and not planet.has_moon:
+            planet.has_moon = True
+
         session.commit()
-
-
-def parse_battlesim_api(battlesim_api_key, player_id):
-    fleet_and_techs = {"techs": {}, "ships": {}}
-
-    for part in battlesim_api_key.split("|"):
-        key_str, value_str = part.split(";")
-        if not key_str.isdigit():
-            continue
-        key_id = int(key_str)
-        category = "techs" if key_id < 200 else "ships"
-        fleet_and_techs[category][key_id] = int(value_str)
-
-    return save_fleet_and_techs(
-        report_api_key_str=battlesim_api_key,
-        player_id=player_id,
-        ships=fleet_and_techs["ships"],
-        techs=fleet_and_techs["techs"],
-        source="BattleSim",
-        created_at=datetime.utcnow(),
-    )
 
 
 def parse_ogame_sr(sr_api_key):
@@ -80,17 +87,46 @@ def parse_ogame_sr(sr_api_key):
     created_at = datetime.utcfromtimestamp(generic["event_timestamp"])
 
     content = data["details"]
-    ships = {ship["ship_type"]: ship["count"] for ship in content["ships"]}
-    techs = {
-        tech["research_type"]: tech["level"] for tech in content["research"]
-    }
-    return save_fleet_and_techs(
+    ships = {s["ship_type"]: s["count"] for s in content["ships"]}
+    techs = {t["research_type"]: t["level"] for t in content["research"]}
+
+    coord_str = generic.get("defender_planet_coordinates")
+    is_moon = generic.get("defender_planet_type") == 3
+
+    return save_report_with_coords(
         report_api_key_str=sr_api_key,
         player_id=defender_id,
         ships=ships,
         techs=techs,
         source="Ogame",
         created_at=created_at,
+        coord_str=coord_str,
+        from_moon=is_moon,
+    )
+
+
+def parse_battlesim_api(battlesim_api_key, player_id):
+    fleet_and_techs = {"techs": {}, "ships": {}}
+    coord_str = None
+
+    for part in battlesim_api_key.split("|"):
+        key_str, value_str = part.split(";")
+        if key_str == "coords":
+            coord_str = value_str
+        elif key_str.isdigit():
+            key_id = int(key_str)
+            category = "techs" if key_id < 200 else "ships"
+            fleet_and_techs[category][key_id] = int(value_str)
+
+    return save_report_with_coords(
+        report_api_key_str=battlesim_api_key,
+        player_id=player_id,
+        ships=fleet_and_techs["ships"],
+        techs=fleet_and_techs["techs"],
+        source="BattleSim",
+        created_at=datetime.utcnow(),
+        coord_str=coord_str,
+        from_moon=False,
     )
 
 
@@ -224,13 +260,27 @@ class OgamePlayer:
             self.db_data.planets,
             key=lambda pl: (pl.galaxy, pl.system, pl.position),
         )
-        active = [
-            f"{(pl.name or 'Colony')} `{pl.coords_str()}`"
-            f"{' 🌙' if pl.has_moon else ''}"
-            for pl in planets
-            if not pl.destroyed
-        ]
-        destroyed = [f"`{pl.coords_str()}`" for pl in planets if pl.destroyed]
+
+        report = self.best_report_api_key_model
+        best_coords = (
+            (report.galaxy, report.system, report.position) if report else None
+        )
+        best_from_moon = report.from_moon if report else False
+
+        active = []
+        for pl in planets:
+            planet_name = pl.name or "Colony"
+            coords = pl.coord_str()
+            moon_emoji = " 🌙" if pl.has_moon else ""
+            if best_coords == (pl.galaxy, pl.system, pl.position):
+                if best_from_moon:
+                    moon_emoji += " 🔴"
+                else:
+                    planet_name += " 🔴"
+            active.append(f"{planet_name} `{coords}`{moon_emoji}")
+
+        destroyed = [f"`{pl.coord_str()}`" for pl in planets if pl.destroyed]
+
         embed.add_field(name="Planets", value="\n".join(active), inline=False)
         if destroyed:
             embed.add_field(
@@ -280,7 +330,7 @@ class OgamePlayer:
         if self.best_report_api_key_model:
             embed.add_field(
                 name="Latest Report API Key",
-                value=f"{self.best_report_api_key_model.report_api_key}\n\n"
+                value=f"```{self.best_report_api_key_model.report_api_key}```"
                 "**Retrieved on**: "
                 f"{self.best_report_api_key_model.timestamp_display_text()}",
                 inline=False,

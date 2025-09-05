@@ -128,19 +128,27 @@ async def unlink_discord(
 async def add_key(
     interaction: discord.Interaction, api_key: str, player_name: str = None
 ):
-    if api_key.startswith("sr-"):
-        ogame_api.parse_ogame_sr(api_key)
-    else:
-        if player_name:
-            ogame_id = await resolve_ogame_id(interaction, player_name)
-        if not ogame_id and (sender_id := interaction.user.id):
-            ogame_id = await ogame_api.get_linked_ogame_id(sender_id)
-        if not ogame_id:
-            await interaction.response.send_message(
-                "❌ Could not determine OGame player to add the key for."
-            )
-            return
-        ogame_api.parse_battlesim_api(api_key, ogame_id)
+    try:
+        if api_key.startswith("sr-"):
+            ogame_api.parse_ogame_sr(api_key)
+        else:
+            ogame_id = None
+            if player_name:
+                ogame_id = await resolve_ogame_id(interaction, player_name)
+            if not ogame_id and (sender_id := interaction.user.id):
+                ogame_id = members.discord_to_ogame_id(sender_id)
+            if not ogame_id:
+                await interaction.response.send_message(
+                    "❌ Could not determine OGame player to add the key for."
+                )
+                return
+            ogame_api.parse_battlesim_api(api_key, ogame_id)
+    except ogame_api.DuplicateKeyException:
+        await interaction.response.send_message(
+            f"❌ The API key `{api_key}` already exists in the database.",
+            ephemeral=True,
+        )
+        return
 
     await interaction.response.send_message(
         "✅ Added Report API key for "

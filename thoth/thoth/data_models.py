@@ -26,7 +26,21 @@ class Player(Base):
     report_api_keys = relationship("ReportAPIKey")
 
 
-class Planet(Base):
+class CoordinatesMixin:
+    galaxy = Column(Integer)
+    system = Column(Integer)
+    position = Column(Integer)
+
+    def set_coords(self, coord_str):
+        self.galaxy, self.system, self.position = (
+            int(x) for x in coord_str.split(":")
+        )
+
+    def coord_str(self):
+        return f"{self.galaxy}:{self.system}:{self.position}"
+
+
+class Planet(Base, CoordinatesMixin):
     __tablename__ = "planets"
 
     ogame_id = Column(Integer, ForeignKey("players.ogame_id"), primary_key=True)
@@ -37,13 +51,9 @@ class Planet(Base):
     name = Column(String, nullable=True)
     has_moon = Column(Boolean, default=False)
     destroyed = Column(Boolean, default=False)
-
     manual_edit = Column(DateTime, nullable=True)
 
     player = relationship("Player", back_populates="planets")
-
-    def coords_str(self) -> str:
-        return f"{self.galaxy}:{self.system}:{self.position}"
 
     def has_recent_manual_edit(self) -> bool:
         return self.manual_edit is not None and self.manual_edit >= (
@@ -65,14 +75,31 @@ class DiscordUser(Base):
     player = relationship("Player", uselist=False)
 
 
-class ReportAPIKey(Base):
+class ReportAPIKey(Base, CoordinatesMixin):
     __tablename__ = "report_api_keys"
 
     report_api_key = Column(String, primary_key=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     ogame_id = Column(Integer, ForeignKey("players.ogame_id"), nullable=False)
     source = Column(String, nullable=False)
+    from_moon = Column(Boolean, default=False)
 
+    ships = relationship("FleetShip", cascade="all, delete-orphan")
+    techs = relationship("FleetTech", cascade="all, delete-orphan")
+
+    planet = relationship(
+        "Planet",
+        primaryjoin=(
+            "and_("
+            "foreign(ReportAPIKey.ogame_id) == Planet.ogame_id, "
+            "foreign(ReportAPIKey.galaxy) == Planet.galaxy, "
+            "foreign(ReportAPIKey.system) == Planet.system, "
+            "foreign(ReportAPIKey.position) == Planet.position"
+            ")"
+        ),
+        viewonly=True,
+        uselist=False,
+    )
     ships = relationship("FleetShip", cascade="all, delete-orphan")
     techs = relationship("FleetTech", cascade="all, delete-orphan")
 
@@ -98,7 +125,12 @@ class ReportAPIKey(Base):
             ago = f"{hours} hour{'s' if hours != 1 else ''} ago"
         else:
             days = seconds // 86400
-            ago = f"{days} day{'s' if days != 1 else ''} ago"
+            hours = (seconds % 86400) // 3600
+            if hours:
+                ago = f"{days} day{'s' if days != 1 else ''} "
+                f"{hours} hour{'s' if hours != 1 else ''} ago"
+            else:
+                ago = f"{days} day{'s' if days != 1 else ''} ago"
 
         return f"{created_at_utc:%Y-%m-%d %H:%M:%S UTC} ({ago})"
 
