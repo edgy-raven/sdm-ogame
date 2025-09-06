@@ -11,7 +11,10 @@ class MembershipError(Exception):
 
 def discord_to_ogame_id(discord_id):
     with data_models.Session() as session:
-        return session.get(data_models.DiscordUser, discord_id).ogame_id
+        discord_user_model = session.get(data_models.DiscordUser, discord_id)
+        if discord_user_model:
+            return discord_user_model.ogame_id
+        return None
 
 
 def link(discord_id, ogame_name):

@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from functools import cached_property
 
 from sqlalchemy import (
     create_engine,
@@ -84,8 +85,11 @@ class ReportAPIKey(Base, CoordinatesMixin):
     source = Column(String, nullable=False)
     from_moon = Column(Boolean, default=False)
 
-    ships = relationship("FleetShip", cascade="all, delete-orphan")
-    techs = relationship("FleetTech", cascade="all, delete-orphan")
+    ships = relationship("Ships", cascade="all, delete-orphan")
+    techs = relationship("Techs", cascade="all, delete-orphan")
+    resources = relationship(
+        "Resources", cascade="all, delete-orphan", uselist=False
+    )
 
     planet = relationship(
         "Planet",
@@ -100,14 +104,22 @@ class ReportAPIKey(Base, CoordinatesMixin):
         viewonly=True,
         uselist=False,
     )
-    ships = relationship("FleetShip", cascade="all, delete-orphan")
-    techs = relationship("FleetTech", cascade="all, delete-orphan")
 
-    def fleet_and_tech_dict(self):
-        return {
+    @cached_property
+    def report_details(self):
+        data = {
             "ships": {ship.ship_type: ship.count for ship in self.ships},
             "techs": {tech.tech_type: tech.level for tech in self.techs},
         }
+
+        if self.source == "Ogame":
+            data["resources"] = {
+                "metal": self.resources.metal,
+                "crystal": self.resources.crystal,
+                "deuterium": self.resources.deuterium,
+            }
+
+        return data
 
     def timestamp_display_text(self):
         created_at_utc = self.created_at.replace(tzinfo=timezone.utc)
@@ -135,7 +147,7 @@ class ReportAPIKey(Base, CoordinatesMixin):
         return f"{created_at_utc:%Y-%m-%d %H:%M:%S UTC} ({ago})"
 
 
-class FleetShip(Base):
+class Ships(Base):
     __tablename__ = "fleet_ships"
 
     report_api_key = Column(
@@ -145,7 +157,7 @@ class FleetShip(Base):
     count = Column(Integer, nullable=False)
 
 
-class FleetTech(Base):
+class Techs(Base):
     __tablename__ = "fleet_techs"
 
     report_api_key = Column(
@@ -153,6 +165,18 @@ class FleetTech(Base):
     )
     tech_type = Column(Integer, primary_key=True)
     level = Column(Integer, nullable=False)
+
+
+class Resources(Base):
+    __tablename__ = "report_resources"
+
+    report_api_key = Column(
+        String, ForeignKey("report_api_keys.report_api_key"), primary_key=True
+    )
+
+    metal = Column(Integer, default=0, nullable=False)
+    crystal = Column(Integer, default=0, nullable=False)
+    deuterium = Column(Integer, default=0, nullable=False)
 
 
 engine = create_engine("sqlite:///ogame_players.db")

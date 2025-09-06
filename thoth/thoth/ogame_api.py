@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from functools import lru_cache, cached_property
+from functools import lru_cache
 import xml.etree.ElementTree as ET
 
 import discord
@@ -38,6 +38,7 @@ def save_report_with_coords(
     created_at,
     coord_str,
     from_moon=False,
+    resources=None,
 ):
     with data_models.Session() as session:
         if session.get(data_models.ReportAPIKey, report_api_key_str):
@@ -53,18 +54,24 @@ def save_report_with_coords(
             from_moon=from_moon,
         )
         report.set_coords(coord_str)
+
         report.ships.extend(
-            data_models.FleetShip(ship_type=stype, count=count)
+            data_models.Ships(ship_type=stype, count=count)
             for stype, count in ships.items()
             if stype not in PEACEFUL_SHIPS
         )
         report.techs.extend(
-            data_models.FleetTech(tech_type=ttype, level=level)
+            data_models.Techs(tech_type=ttype, level=level)
             for ttype, level in techs.items()
         )
+        if resources:
+            report.resources = data_models.Resources(
+                metal=resources.get("metal", 0),
+                crystal=resources.get("crystal", 0),
+                deuterium=resources.get("deuterium", 0),
+            )
         report = session.merge(report)
         session.flush()
-
         if not (planet := report.planet):
             planet = data_models.Planet(
                 ogame_id=player_id, has_moon=from_moon, manual_edit=created_at
@@ -102,6 +109,7 @@ def parse_ogame_sr(sr_api_key):
         created_at=created_at,
         coord_str=coord_str,
         from_moon=is_moon,
+        resources=content["resources"],
     )
 
 
@@ -169,6 +177,205 @@ def get_player_name_from_api_key(api_key):
         return player.name
 
 
+class ReportWithDelta:
+    DRIVES = [
+        ("Combustion Drive", "Combustion", 115),
+        ("Impulse Drive", "Impulse", 117),
+        ("Hyperspace Drive", "Hyperspace", 118),
+    ]
+    WEAPONS = [
+        ("Weapons Technology", "Weapons", 109),
+        ("Shielding Technology", "Shields", 110),
+        ("Armor Technology", "Armor", 111),
+    ]
+    CORE_TECHS_IDS = {115, 117, 118, 109, 110, 111}
+
+    @property
+    def is_sr_report(self):
+        return self.report_api_key.startswith("sr-")
+
+    @property
+    def has_delta(self):
+        return any(d != 0 for c in self.deltas.values() for d in c.values())
+
+    def __init__(self, report_api_key, compute_delta=True):
+        self.report_api_key = report_api_key
+
+        with data_models.Session() as session:
+            self.new_report = session.get(
+                data_models.ReportAPIKey, self.report_api_key
+            )
+            # Force load relationships
+            _ = self.new_report.report_details
+            self.deltas = {"resources": {}, "ships": {}, "techs": {}}
+            self.last_report = None
+            if not self.is_sr_report:
+                return
+
+            self.last_report = (
+                session.query(data_models.ReportAPIKey)
+                .filter(
+                    data_models.ReportAPIKey.source == "Ogame",
+                    data_models.ReportAPIKey.ogame_id
+                    == self.new_report.ogame_id,
+                    data_models.ReportAPIKey.from_moon
+                    == self.new_report.from_moon,
+                    data_models.ReportAPIKey.galaxy == self.new_report.galaxy,
+                    data_models.ReportAPIKey.system == self.new_report.system,
+                    data_models.ReportAPIKey.position
+                    == self.new_report.position,
+                    data_models.ReportAPIKey.created_at
+                    < self.new_report.created_at,
+                )
+                .order_by(data_models.ReportAPIKey.created_at.desc())
+                .first()
+            )
+            if not self.last_report or not compute_delta:
+                return
+            for cat in self.deltas:
+                new_cat = self.new_report.report_details[cat]
+                old_cat = self.last_report.report_details[cat]
+                for k in set(new_cat) | set(old_cat):
+                    new_val = new_cat.get(k, 0)
+                    old_val = old_cat.get(k, 0)
+                    self.deltas[cat][k] = new_val - old_val
+
+    def _line(self, name, val, delta):
+        def fmt(n):
+            if abs(n) >= 1_000_000_000:
+                return f"{n / 1_000_000_000:.4g}B"
+            elif abs(n) >= 1_000_000:
+                return f"{n / 1_000_000:.4g}M"
+            else:
+                return f"{n:,}"
+
+        if not self.last_report:
+            return f"{name}{':' if name else ''} {fmt(val)}"
+        emoji = "🟢" if delta > 0 else "🔴" if delta < 0 else "⚪"
+        return (
+            f"{emoji} {name}{':' if name else ''} {fmt(val)} "
+            f"({'+' if delta > 0 else ''}{fmt(delta)})"
+        )
+
+    def add_tech_fields_to_discord_embed(self, embed, id_to_name):
+        techs = {
+            id_to_name[k]: v
+            for k, v in self.new_report.report_details["techs"].items()
+        }
+        embed.add_field(
+            name="Drives",
+            value="\n".join(
+                [
+                    self._line(
+                        short,
+                        techs.get(long, 0),
+                        self.deltas["techs"].get(tech_id, 0),
+                    )
+                    for long, short, tech_id in self.DRIVES
+                ]
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="Weapons",
+            value="\n".join(
+                [
+                    self._line(
+                        short,
+                        techs.get(long, 0),
+                        self.deltas["techs"].get(tech_id, 0),
+                    )
+                    for long, short, tech_id in self.WEAPONS
+                ]
+            ),
+            inline=True,
+        )
+        other_techs_content = "\n".join(
+            sorted(
+                [
+                    self._line(
+                        id_to_name[tech_id],
+                        techs.get(id_to_name[tech_id], 0),
+                        delta,
+                    )
+                    for tech_id, delta in self.deltas["techs"].items()
+                    if delta != 0 and tech_id not in self.CORE_TECHS_IDS
+                ],
+                key=lambda x: x.lower(),
+            )
+        )
+        if other_techs_content:
+            embed.add_field(
+                name="Other Techs",
+                value=other_techs_content,
+                inline=False,
+            )
+
+    def add_ship_fields_to_discord_embed(self, embed, id_to_name):
+        ship_lines = sorted(
+            [
+                (
+                    id_to_name[k],
+                    self._line(id_to_name[k], v, self.deltas["ships"].get(k)),
+                )
+                for k, v in self.new_report.report_details["ships"].items()
+            ],
+            key=lambda x: x[0],
+        )
+        ship_lines = [x[1] for x in ship_lines]
+        if ship_lines:
+            if len(ship_lines) > 5:
+                half = (len(ship_lines) + 1) // 2
+                embed.add_field(
+                    name="Ships",
+                    value="\n".join(ship_lines[:half]),
+                    inline=True,
+                )
+                embed.add_field(
+                    name="\u200b",
+                    value="\n".join(ship_lines[half:]),
+                    inline=True,
+                )
+            else:
+                embed.add_field(
+                    name="Ships", value="\n".join(ship_lines), inline=False
+                )
+
+    def to_discord_embed(self):
+        id_to_name = get_ogame_localization_xml()
+
+        player = get_player_name_from_api_key(self.report_api_key)
+        embed = discord.Embed(
+            title=f"{player} - {self.new_report.coord_str()}"
+            f"{' [Moon]' if self.new_report.from_moon else ''}",
+            color=discord.Color.blue(),
+        )
+
+        if self.is_sr_report:
+            for r in ["metal", "crystal", "deuterium"]:
+                embed.add_field(
+                    name=r.capitalize(),
+                    value=self._line(
+                        "",
+                        self.new_report.report_details["resources"][r],
+                        self.deltas["resources"].get(r),
+                    ),
+                    inline=True,
+                )
+
+        self.add_tech_fields_to_discord_embed(embed, id_to_name)
+        embed.add_field(name="", value="", inline=False)
+        self.add_ship_fields_to_discord_embed(embed, id_to_name)
+
+        if self.last_report:
+            embed.add_field(
+                name="Previous Report Retrieved On",
+                value=self.last_report.timestamp_display_text(),
+                inline=False,
+            )
+        return embed
+
+
 def sync_planets(player_id, planets):
     seen_coords = set()
 
@@ -229,32 +436,6 @@ class OgamePlayer:
     alliance: str
     best_report_api_key_model: data_models.ReportAPIKey | None = None
 
-    @cached_property
-    def fleet_and_techs(self):
-        if not self.best_report_api_key_model:
-            return None
-        return self.best_report_api_key_model.fleet_and_tech_dict()
-
-    def _add_tech_fields(self, embed, id_to_name):
-        if not self.fleet_and_techs:
-            return
-        techs = {
-            id_to_name[k]: v
-            for k, v in sorted(self.fleet_and_techs["techs"].items())
-        }
-        drives = (
-            f"Combustion: {techs.get('Combustion Drive', 0)}\n"
-            f"Impulse: {techs.get('Impulse Drive', 0)}\n"
-            f"Hyperspace: {techs.get('Hyperspace Drive', 0)}"
-        )
-        weapons = (
-            f"Weapons: {techs.get('Weapons Technology', 0)}\n"
-            f"Shields: {techs.get('Shielding Technology', 0)}\n"
-            f"Armor: {techs.get('Armor Technology', 0)}"
-        )
-        embed.add_field(name="Drives", value=drives, inline=True)
-        embed.add_field(name="Weapons", value=weapons, inline=True)
-
     def _add_planet_fields(self, embed):
         planets = sorted(
             self.db_data.planets,
@@ -289,32 +470,6 @@ class OgamePlayer:
                 inline=False,
             )
 
-    def _add_ship_fields(self, embed, id_to_name):
-        if not self.fleet_and_techs:
-            return
-
-        ships = {
-            id_to_name[k]: v for k, v in self.fleet_and_techs["ships"].items()
-        }
-        ship_list = [f"{n}: {c}" for n, c in sorted(ships.items()) if c > 0]
-        if ship_list:
-            if len(ship_list) > 5:
-                half = (len(ship_list) + 1) // 2
-                embed.add_field(
-                    name="Ships",
-                    value="\n".join(ship_list[:half]),
-                    inline=True,
-                )
-                embed.add_field(
-                    name="\u200b",
-                    value="\n".join(ship_list[half:]),
-                    inline=True,
-                )
-            else:
-                embed.add_field(
-                    name="Ships", value="\n".join(ship_list), inline=False
-                )
-
     def to_discord_embed(self):
         id_to_name = get_ogame_localization_xml()
         embed = discord.Embed(
@@ -327,6 +482,7 @@ class OgamePlayer:
             name="Alliance", value=self.alliance or "None", inline=False
         )
 
+        report_with_delta = None
         if self.best_report_api_key_model:
             embed.add_field(
                 name="Latest Report API Key",
@@ -335,9 +491,19 @@ class OgamePlayer:
                 f"{self.best_report_api_key_model.timestamp_display_text()}",
                 inline=False,
             )
-        self._add_tech_fields(embed, id_to_name)
+            report_with_delta = ReportWithDelta(
+                self.best_report_api_key_model.report_api_key, False
+            )
+            report_with_delta.add_tech_fields_to_discord_embed(
+                embed, id_to_name
+            )
+
         self._add_planet_fields(embed)
-        self._add_ship_fields(embed, id_to_name)
+
+        if report_with_delta:
+            report_with_delta.add_ship_fields_to_discord_embed(
+                embed, id_to_name
+            )
 
         return embed
 

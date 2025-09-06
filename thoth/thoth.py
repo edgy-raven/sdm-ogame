@@ -2,6 +2,7 @@ import json
 
 import discord
 from discord import app_commands
+from discord.ui import View, Button
 
 from thoth import ogame_api, members, trade
 
@@ -25,10 +26,10 @@ async def on_ready():
 
 async def resolve_ogame_id(interaction, player_name):
     if player_name.startswith("<@"):
-        if discord_model := members.discord_to_ogame_id(
+        if ogame_id := members.discord_to_ogame_id(
             int(player_name.strip("<@!>"))
         ):
-            return discord_model.ogame_id
+            return ogame_id
         await interaction.response.send_message(
             f"❌ Discord user {player_name} is not linked to any OGame player.",
             ephemeral=True,
@@ -117,6 +118,30 @@ async def unlink_discord(
             raise
 
 
+class ShowReportView(View):
+    def __init__(self, api_key, compute_delta=True):
+        super().__init__(timeout=120)
+        self.api_key = api_key
+        self.compute_delta = compute_delta
+
+    @discord.ui.button(
+        label="Show Report Contents", style=discord.ButtonStyle.primary
+    )
+    async def show_report(
+        self, interaction: discord.Interaction, button: Button
+    ):
+        button.disabled = True
+        self.stop()
+
+        r = ogame_api.ReportWithDelta(self.api_key, self.compute_delta)
+        await interaction.response.edit_message(
+            content="Here is the report for "
+            f"**{ogame_api.get_player_name_from_api_key(self.api_key)}**.",
+            embed=r.to_discord_embed(),
+            view=self,
+        )
+
+
 @tree.command(
     name="add_key",
     description="Add a Report API key",
@@ -132,11 +157,11 @@ async def add_key(
         if api_key.startswith("sr-"):
             ogame_api.parse_ogame_sr(api_key)
         else:
-            ogame_id = None
-            if player_name:
-                ogame_id = await resolve_ogame_id(interaction, player_name)
-            if not ogame_id and (sender_id := interaction.user.id):
-                ogame_id = members.discord_to_ogame_id(sender_id)
+            ogame_id = (
+                (await resolve_ogame_id(interaction, player_name))
+                if player_name
+                else members.discord_to_ogame_id(interaction.user.id)
+            )
             if not ogame_id:
                 await interaction.response.send_message(
                     "❌ Could not determine OGame player to add the key for."
@@ -144,15 +169,26 @@ async def add_key(
                 return
             ogame_api.parse_battlesim_api(api_key, ogame_id)
     except ogame_api.DuplicateKeyException:
+        player_name = ogame_api.get_player_name_from_api_key(api_key)
         await interaction.response.send_message(
-            f"❌ The API key `{api_key}` already exists in the database.",
-            ephemeral=True,
+            f"❌ API key for **{player_name}** already exists. View report?",
+            view=ShowReportView(api_key, compute_delta=False),
         )
-        return
 
+    r = ogame_api.ReportWithDelta(api_key)
+    player_name = ogame_api.get_player_name_from_api_key(api_key)
+    if r.is_sr_report and r.last_report and not r.has_delta:
+        msg = (
+            f"⚠️ Added key for **{player_name}**, "
+            "there is no change since the last report. View report anyways?"
+        )
+    else:
+        msg = f"✅ Added key for **{player_name}**. View report?"
     await interaction.response.send_message(
-        "✅ Added Report API key for "
-        f"**{ogame_api.get_player_name_from_api_key(api_key)}**."
+        msg,
+        view=ShowReportView(
+            api_key, compute_delta=r.is_sr_report and r.has_delta
+        ),
     )
 
 
