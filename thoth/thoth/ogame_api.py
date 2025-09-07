@@ -424,9 +424,9 @@ def sync_planets(player_id, planets):
                     planet_model.position,
                 )
                 in seen_coords
-                or planet.has_recent_manual_edit()
+                or planet_model.has_recent_manual_edit()
             ):
-                session.delete(planet)
+                session.delete(planet_model)
         session.commit()
 
 
