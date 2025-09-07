@@ -20,11 +20,23 @@ Base = declarative_base()
 class Player(Base):
     __tablename__ = "players"
 
-    ogame_id = Column(Integer, primary_key=True, index=True)
+    ogame_id = Column(Integer, primary_key=True)
     name = Column(String, nullable=False)
 
     planets = relationship("Planet", back_populates="player")
     report_api_keys = relationship("ReportAPIKey")
+
+
+class HighScore(Base):
+    __tablename__ = "highscore"
+
+    ogame_id = Column(Integer, primary_key=True)
+    created_at = Column(DateTime, primary_key=True)
+    total_pt = Column(Integer, nullable=False)
+    total_rk = Column(Integer, nullable=False)
+    mil_pt = Column(Integer, nullable=False)
+    mil_rk = Column(Integer, nullable=False)
+    mil_built_pt = Column(Integer, nullable=False)
 
 
 class CoordinatesMixin:
