@@ -5,6 +5,7 @@ import xml.etree.ElementTree as ET
 
 import discord
 import requests
+from sqlalchemy.orm import selectinload
 
 from thoth import data_models
 
@@ -431,14 +432,13 @@ def sync_planets(player_id, planets):
 
 @dataclass
 class OgamePlayer:
-    db_data: data_models.Player
-    rank: int
-    alliance: str
+    player_model: data_models.Player
+    alliance: str | None
     best_report_api_key_model: data_models.ReportAPIKey | None = None
 
     def _add_planet_fields(self, embed):
         planets = sorted(
-            self.db_data.planets,
+            self.player_model.planets,
             key=lambda pl: (pl.galaxy, pl.system, pl.position),
         )
 
@@ -472,14 +472,27 @@ class OgamePlayer:
 
     def to_discord_embed(self):
         id_to_name = get_ogame_localization_xml()
+
         embed = discord.Embed(
-            title=f"OGame Player: {self.db_data.name}",
+            title=f"{self.player_model.name}"
+            f"{f' - {self.alliance}' if self.alliance else ''}",
             color=discord.Color.blue(),
         )
 
-        embed.add_field(name="Overall Rank", value=self.rank, inline=False)
+        last_hs = self.player_model.last_highscore
+        second_hs = self.player_model.second_last_highscore
+
         embed.add_field(
-            name="Alliance", value=self.alliance or "None", inline=False
+            name="Overall Rank",
+            value=f"**{last_hs.total_rk}** {last_hs.total_pt:,}"
+            f" ({last_hs.total_pt - second_hs.total_pt:+,})",
+            inline=True,
+        )
+        embed.add_field(
+            name="Military Rank",
+            value=f"**{last_hs.mil_rk}** {last_hs.mil_pt:,}"
+            f" ({last_hs.mil_pt - second_hs.mil_pt:+,})",
+            inline=True,
         )
 
         report_with_delta = None
@@ -540,19 +553,33 @@ def get_player_info(ogame_id):
 
     sync_planets(ogame_id, player_data["planets"]["planet"])
     with data_models.Session() as session:
-        player_model = session.get(data_models.Player, ogame_id)
-        _ = player_model.planets
-
+        player_model = (
+            session.query(data_models.Player)
+            .options(
+                selectinload(data_models.Player.planets),
+                selectinload(data_models.Player.report_api_keys).selectinload(
+                    data_models.ReportAPIKey.ships
+                ),
+                selectinload(data_models.Player.report_api_keys).selectinload(
+                    data_models.ReportAPIKey.techs
+                ),
+                selectinload(data_models.Player.report_api_keys).selectinload(
+                    data_models.ReportAPIKey.resources
+                ),
+                selectinload(data_models.Player.highscores),
+            )
+            .get(ogame_id)
+        )
         best_report_api_key_model = get_best_api_key(player_model)
         if best_report_api_key_model:
-            _ = best_report_api_key_model.ships
-            _ = best_report_api_key_model.techs
             session.expunge(best_report_api_key_model)
         session.expunge(player_model)
 
+    alliance = player_data.get("alliance")
     return OgamePlayer(
-        db_data=player_model,
-        rank=player_data.get("positions", {}).get("position", [])[0],
-        alliance=player_data.get("alliance", {}).get("name", "None"),
+        player_model=player_model,
+        alliance=(
+            f"{alliance['name']} [{alliance['tag']}]" if alliance else None
+        ),
         best_report_api_key_model=best_report_api_key_model,
     )

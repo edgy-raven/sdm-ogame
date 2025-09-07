@@ -11,10 +11,22 @@ from sqlalchemy import (
     ForeignKey,
     DateTime,
 )
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
-
 Base = declarative_base()
+
+
+class HighScore(Base):
+    __tablename__ = "highscore"
+
+    ogame_id = Column(Integer, ForeignKey("players.ogame_id"), primary_key=True)
+    created_at = Column(DateTime, primary_key=True)
+    total_pt = Column(Integer, nullable=False)
+    total_rk = Column(Integer, nullable=False)
+    mil_pt = Column(Integer, nullable=False)
+    mil_rk = Column(Integer, nullable=False)
+    mil_built_pt = Column(Integer, nullable=False)
 
 
 class Player(Base):
@@ -26,17 +38,15 @@ class Player(Base):
     planets = relationship("Planet", back_populates="player")
     report_api_keys = relationship("ReportAPIKey")
 
+    highscores = relationship(HighScore, order_by=HighScore.created_at.desc())
 
-class HighScore(Base):
-    __tablename__ = "highscore"
+    @hybrid_property
+    def last_highscore(self):
+        return self.highscores[0] if self.highscores else None
 
-    ogame_id = Column(Integer, primary_key=True)
-    created_at = Column(DateTime, primary_key=True)
-    total_pt = Column(Integer, nullable=False)
-    total_rk = Column(Integer, nullable=False)
-    mil_pt = Column(Integer, nullable=False)
-    mil_rk = Column(Integer, nullable=False)
-    mil_built_pt = Column(Integer, nullable=False)
+    @hybrid_property
+    def second_last_highscore(self):
+        return self.highscores[1] if len(self.highscores) > 1 else None
 
 
 class CoordinatesMixin:
