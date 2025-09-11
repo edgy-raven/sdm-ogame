@@ -110,7 +110,7 @@ class ReportAPIKey(Base, CoordinatesMixin):
     __tablename__ = "report_api_keys"
 
     report_api_key = Column(String, primary_key=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now(timezone.utc))
     ogame_id = Column(Integer, ForeignKey("players.ogame_id"), nullable=False)
     source = Column(String, nullable=False)
     from_moon = Column(Boolean, default=False)
@@ -173,8 +173,10 @@ class ReportAPIKey(Base, CoordinatesMixin):
             days = seconds // 86400
             hours = (seconds % 86400) // 3600
             if hours:
-                ago = f"{days} day{'s' if days != 1 else ''} "
-                f"{hours} hour{'s' if hours != 1 else ''} ago"
+                ago = (
+                    f"{days} day{'s' if days != 1 else ''} "
+                    f"{hours} hour{'s' if hours != 1 else ''} ago"
+                )
             else:
                 ago = f"{days} day{'s' if days != 1 else ''} ago"
 

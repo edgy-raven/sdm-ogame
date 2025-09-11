@@ -1,11 +1,12 @@
 import argparse
+import asyncio
 import json
 
 import discord
 from discord import app_commands
 from discord.ui import View, Button
 
-from thoth import ogame_api, members, trade
+from thoth import ogame_api, members, reports, trade
 
 
 parser = argparse.ArgumentParser(description="SDM OGame Discord Bot")
@@ -32,6 +33,117 @@ async def on_ready():
     await client.change_presence(
         activity=discord.Game("Might of Tsuki no Kami!")
     )
+
+
+class PrivateChannel(app_commands.Group):
+    def __init__(self):
+        super().__init__(
+            name="acs_channel", description="Manage ACS channels"
+        )
+        self.active_channels: dict[int, discord.TextChannel] = {}
+
+    async def _parse_mentions(self, interaction, mentions_str):
+        members = []
+        for tok in mentions_str.split():
+            if tok.startswith("<@"):
+                if member := await interaction.guild.fetch_member(int(tok.strip("<@!>"))):
+                    members.append(member)
+        return members
+
+    @app_commands.command(name="create")
+    @app_commands.describe(
+        duration="Duration in minutes (max 720)",
+        members="Members to include in the ACS channel",
+    )
+    async def create(
+        self,
+        interaction: discord.Interaction,
+        members: str,
+        duration: int = 120,
+    ):
+        if channel := self.active_channels.get(interaction.user.id):
+            return await interaction.response.send_message(
+                f"You already have {channel.mention}", ephemeral=True
+            )
+        
+        channel = await interaction.guild.create_text_channel(
+            f"private-{interaction.user.name}",
+            overwrites={
+                interaction.guild.default_role: discord.PermissionOverwrite(
+                    view_channel=False
+                ),
+                interaction.user: discord.PermissionOverwrite(
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True,
+                ),
+                **{
+                    m: discord.PermissionOverwrite(
+                        view_channel=True,
+                        send_messages=True,
+                        read_message_history=True,
+                    )
+                    for m in await self._parse_mentions(interaction, members)
+                },
+            },
+            category=discord.utils.get(
+                interaction.guild.categories, name="Private Channels"
+            ),
+        )
+        self.active_channels[interaction.user.id] = channel
+        await interaction.response.send_message(
+            f"✅ Created {channel.mention}!"
+        )
+
+        await asyncio.sleep(min(duration, 720) * 60)
+        if self.active_channels.get(interaction.user.id) == channel:
+            await channel.delete(reason="Expired")
+            self.active_channels.pop(interaction.user.id, None)
+
+    async def _require_active_channel(self, interaction: discord.Interaction):
+        if not (channel := self.active_channels.get(interaction.user.id)):
+            await interaction.response.send_message(
+                "No active channel.", ephemeral=True
+            )
+            return None
+        return channel
+
+    @app_commands.command(name="invite")
+    @app_commands.describe(members="Members to invite to your ACS channel")
+    async def invite(
+        self, interaction: discord.Interaction, members: str
+    ):
+        if not (channel := await self._require_active_channel(interaction)):
+            return
+        if not (members := self._parse_mentions(interaction, members)):
+            return await interaction.response.send_message(
+                "No members provided.", ephemeral=True
+            )
+
+        for m in members:
+            await channel.set_permissions(
+                m,
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+            )
+        await interaction.response.send_message(
+            f"✅ Added {', '.join(m.mention for m in members)}.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="delete")
+    async def delete(self, interaction: discord.Interaction):
+        if not (channel := await self._require_active_channel(interaction)):
+            return
+        await interaction.response.send_message(
+            f"🗑️ Deleting {channel.mention}...", ephemeral=True
+        )
+        await channel.delete(reason="Deleted by creator")
+        self.active_channels.pop(interaction.user.id, None)
+
+
+tree.add_command(PrivateChannel(), guild=discord.Object(id=SDM_GUILD_ID))
 
 
 async def resolve_ogame_id(interaction, player_name):
@@ -62,8 +174,9 @@ async def resolve_ogame_id(interaction, player_name):
 async def lookup(interaction: discord.Interaction, player_name: str):
     if not (ogame_id := await resolve_ogame_id(interaction, player_name)):
         return
+    await interaction.response.defer()
     player_obj = ogame_api.get_player_info(ogame_id)
-    await interaction.response.send_message(embed=player_obj.to_discord_embed())
+    await interaction.followup.send(embed=player_obj.to_discord_embed())
 
 
 @tree.command(
@@ -137,11 +250,11 @@ class ShowReportView(View):
         button.disabled = True
         self.stop()
 
-        r = ogame_api.ReportWithDelta(self.api_key, self.compute_delta)
+        r = reports.ReportWithDelta(self.api_key, self.compute_delta)
         await interaction.response.edit_message(
             content="Here is the report for "
-            f"**{ogame_api.get_player_name_from_api_key(self.api_key)}**.",
-            embed=r.to_discord_embed(),
+            f"**{reports.get_player_name_from_api_key(self.api_key)}**.",
+            embed=r.to_discord_embed(ogame_api.get_ogame_localization_xml()),
             view=self,
         )
 
@@ -178,10 +291,9 @@ async def add_key(
                     ephemeral=True,
                 )
                 return
-        ogame_api.add_key(api_key, player_id=ogame_id, force=force)
-        r = ogame_api.ReportWithDelta(api_key)
-        player_name = ogame_api.get_player_name_from_api_key(api_key)
-
+        api_key = reports.add_key(api_key, player_id=ogame_id, force=force)
+        r = reports.ReportWithDelta(api_key)
+        player_name = reports.get_player_name_from_api_key(api_key)
         if r.is_sr_report and r.last_report and not r.has_delta:
             msg = (
                 f"⚠️ Added key for **{player_name}**, "
@@ -197,9 +309,9 @@ async def add_key(
                 compute_delta=r.is_sr_report and r.has_delta,
             ),
         )
-    except ogame_api.ReportAPIException as e:
+    except reports.ReportAPIException as e:
         if e.reason == "duplicate_key":
-            player_name = ogame_api.get_player_name_from_api_key(api_key)
+            player_name = reports.get_player_name_from_api_key(api_key)
             await interaction.response.send_message(
                 f"❌ API key for **{player_name}** exists. View report?",
                 view=ShowReportView(api_key, compute_delta=False),
@@ -227,16 +339,14 @@ async def delete_key(
     delete_planet: bool = False,
 ):
     try:
-        deleted_coords = ogame_api.delete_report_and_planet(
-            api_key, delete_planet
-        )
+        deleted_coords = reports.delete_key(api_key, delete_planet)
         if deleted_coords:
             await interaction.response.send_message(
                 f"✅ Deleted API key and planet at `{deleted_coords}`"
             )
         else:
             await interaction.response.send_message("✅ Deleted API key")
-    except ogame_api.ReportAPIException as e:
+    except reports.ReportAPIException as e:
         await interaction.response.send_message(
             f"❌ {e.message}",
             ephemeral=True,
