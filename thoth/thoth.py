@@ -1,3 +1,4 @@
+import argparse
 import json
 
 import discord
@@ -7,7 +8,16 @@ from discord.ui import View, Button
 from thoth import ogame_api, members, trade
 
 
-with open("keyring.json", "r") as f:
+parser = argparse.ArgumentParser(description="SDM OGame Discord Bot")
+parser.add_argument(
+    "--keyring",
+    type=str,
+    default="keyring.json",
+    help="Path to keyring.json file (default: keyring.json)",
+)
+args = parser.parse_args()
+
+with open(args.keyring, "r") as f:
     keyring = json.load(f)
 BOT_TOKEN = keyring.get("bot_token")
 SDM_GUILD_ID = keyring.get("guild_id")
@@ -77,17 +87,11 @@ async def link_discord(
         )
     except members.MembershipError as e:
         if e.reason == "player_not_found":
-            msg = f"❌ OGame player **{e.details['player_name']}** not found."
+            msg = f"❌ OGame player **{player_name}** not found."
         elif e.reason == "discord_already_linked":
-            msg = (
-                f"⚠️ {discord_user.mention} already linked to "
-                f"**{e.details['linked_player'].name}**."
-            )
+            msg = f"⚠️ {discord_user.mention} already linked."
         elif e.reason == "player_already_linked":
-            msg = (
-                f"⚠️ **{e.details['player'].name}** already linked to "
-                f"another user."
-            )
+            msg = f"⚠️ **{player_name}** already linked to another user."
         else:
             raise
         await interaction.response.send_message(msg, ephemeral=True)
@@ -111,7 +115,7 @@ async def unlink_discord(
     except members.MembershipError as e:
         if e.reason == "not_linked":
             await interaction.response.send_message(
-                f"❌ {discord_user.mention} not linked to any OGame player.",
+                f"❌ {discord_user.mention} not linked to an OGame player.",
                 ephemeral=True,
             )
         else:
@@ -148,48 +152,95 @@ class ShowReportView(View):
     guild=discord.Object(id=SDM_GUILD_ID),
 )
 @app_commands.describe(
-    player_name="OGame player or mention", api_key="Report API key"
+    api_key="Report API key",
+    player_name="OGame player or mention",
+    force="Bypass checks when adding keys",
 )
 async def add_key(
-    interaction: discord.Interaction, api_key: str, player_name: str = None
+    interaction: discord.Interaction,
+    api_key: str,
+    player_name: str = None,
+    force: bool = False,
 ):
     try:
-        if api_key.startswith("sr-"):
-            ogame_api.parse_ogame_sr(api_key)
-        else:
-            ogame_id = (
-                (await resolve_ogame_id(interaction, player_name))
-                if player_name
-                else members.discord_to_ogame_id(interaction.user.id)
-            )
+        ogame_id = None
+        if not api_key.startswith("sr-"):
+            if player_name:
+                if not (
+                    ogame_id := await resolve_ogame_id(interaction, player_name)
+                ):
+                    return
+            else:
+                ogame_id = members.discord_to_ogame_id(interaction.user.id)
             if not ogame_id:
                 await interaction.response.send_message(
-                    "❌ Could not determine OGame player to add the key for."
+                    "❌ Could not determine OGame player to add the key for.",
+                    ephemeral=True,
                 )
                 return
-            ogame_api.parse_battlesim_api(api_key, ogame_id)
-    except ogame_api.DuplicateKeyException:
+        ogame_api.add_key(api_key, player_id=ogame_id, force=force)
+        r = ogame_api.ReportWithDelta(api_key)
         player_name = ogame_api.get_player_name_from_api_key(api_key)
-        await interaction.response.send_message(
-            f"❌ API key for **{player_name}** already exists. View report?",
-            view=ShowReportView(api_key, compute_delta=False),
-        )
 
-    r = ogame_api.ReportWithDelta(api_key)
-    player_name = ogame_api.get_player_name_from_api_key(api_key)
-    if r.is_sr_report and r.last_report and not r.has_delta:
-        msg = (
-            f"⚠️ Added key for **{player_name}**, "
-            "there is no change since the last report. View report anyways?"
+        if r.is_sr_report and r.last_report and not r.has_delta:
+            msg = (
+                f"⚠️ Added key for **{player_name}**, "
+                "there is no change since the last report. View report?"
+            )
+        else:
+            msg = f"✅ Added key for **{player_name}**. View report?"
+
+        await interaction.response.send_message(
+            msg,
+            view=ShowReportView(
+                api_key,
+                compute_delta=r.is_sr_report and r.has_delta,
+            ),
         )
-    else:
-        msg = f"✅ Added key for **{player_name}**. View report?"
-    await interaction.response.send_message(
-        msg,
-        view=ShowReportView(
-            api_key, compute_delta=r.is_sr_report and r.has_delta
-        ),
-    )
+    except ogame_api.ReportAPIException as e:
+        if e.reason == "duplicate_key":
+            player_name = ogame_api.get_player_name_from_api_key(api_key)
+            await interaction.response.send_message(
+                f"❌ API key for **{player_name}** exists. View report?",
+                view=ShowReportView(api_key, compute_delta=False),
+            )
+            return
+        await interaction.response.send_message(
+            f"❌ {e.message}", ephemeral=True
+        )
+        return
+
+
+@tree.command(
+    name="delete_key",
+    description="Delete a Report API key and optionally its associated planet",
+    guild=discord.Object(id=SDM_GUILD_ID),
+)
+@app_commands.describe(
+    api_key="Report API key to delete",
+    delete_planet="Whether to also delete associated planet if manually added",
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def delete_key(
+    interaction: discord.Interaction,
+    api_key: str,
+    delete_planet: bool = False,
+):
+    try:
+        deleted_coords = ogame_api.delete_report_and_planet(
+            api_key, delete_planet
+        )
+        if deleted_coords:
+            await interaction.response.send_message(
+                f"✅ Deleted API key and planet at `{deleted_coords}`"
+            )
+        else:
+            await interaction.response.send_message("✅ Deleted API key")
+    except ogame_api.ReportAPIException as e:
+        await interaction.response.send_message(
+            f"❌ {e.message}",
+            ephemeral=True,
+        )
 
 
 @tree.command(

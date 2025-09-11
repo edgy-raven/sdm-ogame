@@ -62,6 +62,14 @@ class CoordinatesMixin:
     def coord_str(self):
         return f"{self.galaxy}:{self.system}:{self.position}"
 
+    def has_coordinates(self):
+        return all(
+            x is not None for x in (self.galaxy, self.system, self.position)
+        )
+
+    def coordinates_tuple(self):
+        return (self.galaxy, self.system, self.position)
+
 
 class Planet(Base, CoordinatesMixin):
     __tablename__ = "planets"
@@ -79,9 +87,9 @@ class Planet(Base, CoordinatesMixin):
     player = relationship("Player", back_populates="planets")
 
     def has_recent_manual_edit(self) -> bool:
-        return self.manual_edit is not None and self.manual_edit >= (
-            datetime.utcnow() - timedelta(days=7)
-        )
+        return self.manual_edit is not None and self.manual_edit.replace(
+            tzinfo=timezone.utc
+        ) >= (datetime.now(timezone.utc) - timedelta(days=7))
 
 
 class DiscordUser(Base):
@@ -143,6 +151,10 @@ class ReportAPIKey(Base, CoordinatesMixin):
 
         return data
 
+    @cached_property
+    def military_ships_total(self):
+        return sum(s.count for s in self.ships if s.is_military)
+
     def timestamp_display_text(self):
         created_at_utc = self.created_at.replace(tzinfo=timezone.utc)
         seconds = int(
@@ -172,11 +184,17 @@ class ReportAPIKey(Base, CoordinatesMixin):
 class Ships(Base):
     __tablename__ = "fleet_ships"
 
+    PEACEFUL_SHIPS = {202, 203, 208, 210, 212, 217, 216, 220}
+
     report_api_key = Column(
         String, ForeignKey("report_api_keys.report_api_key"), primary_key=True
     )
     ship_type = Column(Integer, primary_key=True)
     count = Column(Integer, nullable=False)
+
+    @property
+    def is_military(self):
+        return self.ship_type not in self.PEACEFUL_SHIPS
 
 
 class Techs(Base):

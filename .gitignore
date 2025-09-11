@@ -2,3 +2,4 @@ keyring.json
 ogame_players.db
 __pycache__
 *.pyc
+*.code-workspace

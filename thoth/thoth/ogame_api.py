@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 import xml.etree.ElementTree as ET
 
@@ -23,11 +23,34 @@ def get_ogame_localization_xml():
     }
 
 
-PEACEFUL_SHIPS = {202, 203, 208, 210, 212, 217, 216, 220}
+class ReportAPIException(Exception):
+    def __init__(self, reason: str, message: str):
+        self.reason = reason
+        self.message = message
+        super().__init__(message)
 
 
-class DuplicateKeyException(Exception):
-    pass
+def delete_report_and_planet(api_key, delete_planet=False):
+    deleted_coords = None
+
+    with data_models.Session() as session:
+        report = session.get(data_models.ReportAPIKey, api_key)
+        if not report:
+            raise ReportAPIException(
+                "not_found", f"Report API key '{api_key}' not found"
+            )
+        if delete_planet and report.has_coordinates():
+            planet = session.get(
+                data_models.Planet,
+                (report.ogame_id, *report.coordinates_tuple()),
+            )
+            if planet and planet.has_recent_manual_edit():
+                deleted_coords = planet.coord_str()
+                session.delete(planet)
+
+        session.delete(report)
+        session.commit()
+        return deleted_coords
 
 
 def save_report_with_coords(
@@ -37,15 +60,30 @@ def save_report_with_coords(
     techs,
     source,
     created_at,
-    coord_str,
+    coord_str=None,
     from_moon=False,
     resources=None,
+    force=False,
 ):
+    military_ships = {
+        stype: count
+        for stype, count in ships.items()
+        if stype not in data_models.Ships.PEACEFUL_SHIPS
+    }
+
     with data_models.Session() as session:
         if session.get(data_models.ReportAPIKey, report_api_key_str):
-            raise DuplicateKeyException(
-                f"Report API key '{report_api_key_str}' already exists."
+            raise ReportAPIException(
+                "duplicate_key",
+                f"Report API key '{report_api_key_str}' already exists.",
             )
+        player = session.get(data_models.Player, player_id)
+        if not force and player and (best_key := get_best_api_key(player)):
+            if sum(military_ships.values()) < best_key.military_ships_total:
+                raise ReportAPIException(
+                    "fewer_ships",
+                    "Report has fewer ships than best existing report.",
+                )
 
         report = data_models.ReportAPIKey(
             report_api_key=report_api_key_str,
@@ -54,12 +92,11 @@ def save_report_with_coords(
             source=source,
             from_moon=from_moon,
         )
-        report.set_coords(coord_str)
-
+        if coord_str:
+            report.set_coords(coord_str)
         report.ships.extend(
             data_models.Ships(ship_type=stype, count=count)
-            for stype, count in ships.items()
-            if stype not in PEACEFUL_SHIPS
+            for stype, count in military_ships.items()
         )
         report.techs.extend(
             data_models.Techs(tech_type=ttype, level=level)
@@ -73,26 +110,31 @@ def save_report_with_coords(
             )
         report = session.merge(report)
         session.flush()
-        if not (planet := report.planet):
-            planet = data_models.Planet(
-                ogame_id=player_id, has_moon=from_moon, manual_edit=created_at
-            )
-            planet.set_coords(coord_str)
-            session.add(planet)
-        elif from_moon and not planet.has_moon:
-            planet.has_moon = True
+        if coord_str:
+            if not (planet := report.planet):
+                planet = data_models.Planet(
+                    ogame_id=player_id,
+                    has_moon=from_moon,
+                    manual_edit=created_at,
+                )
+                planet.set_coords(coord_str)
+                session.add(planet)
+            elif from_moon and not planet.has_moon:
+                planet.has_moon = True
 
         session.commit()
 
 
-def parse_ogame_sr(sr_api_key):
+def parse_ogame_sr(sr_api_key, force=False):
     response = requests.get(f"https://ogapi.faw-kes.de/v1/report/{sr_api_key}")
     response.raise_for_status()
     data = response.json()["RESULT_DATA"]
 
     generic = data["generic"]
     defender_id = generic["defender_user_id"]
-    created_at = datetime.utcfromtimestamp(generic["event_timestamp"])
+    created_at = datetime.fromtimestamp(
+        generic["event_timestamp"], timezone.utc
+    )
 
     content = data["details"]
     ships = {s["ship_type"]: s["count"] for s in content["ships"]}
@@ -111,10 +153,11 @@ def parse_ogame_sr(sr_api_key):
         coord_str=coord_str,
         from_moon=is_moon,
         resources=content["resources"],
+        force=force,
     )
 
 
-def parse_battlesim_api(battlesim_api_key, player_id):
+def parse_battlesim_api(battlesim_api_key, player_id, force=False):
     fleet_and_techs = {"techs": {}, "ships": {}}
     coord_str = None
 
@@ -133,10 +176,23 @@ def parse_battlesim_api(battlesim_api_key, player_id):
         ships=fleet_and_techs["ships"],
         techs=fleet_and_techs["techs"],
         source="BattleSim",
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         coord_str=coord_str,
         from_moon=False,
+        force=force,
     )
+
+
+def add_key(key: str, *, player_id=None, force=False):
+    if key.startswith("sr-"):
+        parse_ogame_sr(key, force=force)
+    else:
+        if player_id is None:
+            raise ReportAPIException(
+                "missing_player_id",
+                "player_id is required for BattleSim keys",
+            )
+        parse_battlesim_api(key, player_id, force=force)
 
 
 def bulk_update_players():
@@ -346,9 +402,14 @@ class ReportWithDelta:
         id_to_name = get_ogame_localization_xml()
 
         player = get_player_name_from_api_key(self.report_api_key)
+        title_location = (
+            ""
+            if not self.new_report.has_coordinates()
+            else f" - {self.new_report.coord_str()}"
+            f"{' [Moon]' if self.new_report.from_moon else ''}"
+        )
         embed = discord.Embed(
-            title=f"{player} - {self.new_report.coord_str()}"
-            f"{' [Moon]' if self.new_report.from_moon else ''}",
+            title=f"{player}{title_location}",
             color=discord.Color.blue(),
         )
 
@@ -380,19 +441,21 @@ class ReportWithDelta:
 def sync_planets(player_id, planets):
     seen_coords = set()
 
-    # Ogame API updates weekly, expire any manual edits from before then.
+    # OGame API updates weekly, expire any manual edits from before then
     with data_models.Session() as session:
         for planet in planets:
+            # Extract planet data from API response
             attrs = planet.get("@attributes", {})
             galaxy, system, position = [
                 int(x) for x in attrs.get("coords").split(":")
             ]
             has_moon = "moon" in planet
             planet_name = attrs.get("name")
-
             seen_coords.add((galaxy, system, position))
+
             planet_model = session.get(
-                data_models.Planet, (player_id, galaxy, system, position)
+                data_models.Planet,
+                (player_id, galaxy, system, position),
             )
             if planet_model:
                 planet_model.has_moon = planet_model.has_moon or has_moon
@@ -400,6 +463,7 @@ def sync_planets(player_id, planets):
                 if not planet_model.has_recent_manual_edit():
                     planet_model.destroyed = False
             else:
+                # Create new planet
                 session.add(
                     data_models.Planet(
                         ogame_id=player_id,
@@ -411,6 +475,7 @@ def sync_planets(player_id, planets):
                         destroyed=False,
                     )
                 )
+
         all_planet_models = (
             session.query(data_models.Planet)
             .filter(data_models.Planet.ogame_id == player_id)
@@ -418,12 +483,7 @@ def sync_planets(player_id, planets):
         )
         for planet_model in all_planet_models:
             if not (
-                (
-                    planet_model.galaxy,
-                    planet_model.system,
-                    planet_model.position,
-                )
-                in seen_coords
+                planet_model.coordinates_tuple() in seen_coords
                 or planet_model.has_recent_manual_edit()
             ):
                 session.delete(planet_model)
@@ -444,16 +504,20 @@ class OgamePlayer:
 
         report = self.best_report_api_key_model
         best_coords = (
-            (report.galaxy, report.system, report.position) if report else None
+            report.coordinates_tuple()
+            if report and report.has_coordinates()
+            else None
         )
-        best_from_moon = report.from_moon if report else False
+        best_from_moon = (
+            report.from_moon if report and report.has_coordinates() else False
+        )
 
         active = []
         for pl in planets:
             planet_name = pl.name or "Colony"
             coords = pl.coord_str()
             moon_emoji = " 🌙" if pl.has_moon else ""
-            if best_coords == (pl.galaxy, pl.system, pl.position):
+            if best_coords == pl.coordinates_tuple():
                 if best_from_moon:
                     moon_emoji += " 🔴"
                 else:
@@ -522,25 +586,28 @@ class OgamePlayer:
 
 
 def get_best_api_key(player_model):
-    if battle_sim_keys := [
+    recent_battle_sims = [
         k
         for k in player_model.report_api_keys
-        if k.source == "BattleSim"
-        and k.created_at >= datetime.utcnow() - timedelta(days=7)
-    ]:
-        return max(battle_sim_keys, key=lambda k: k.created_at)
-    if not (
-        ogame_keys := [
-            k for k in player_model.report_api_keys if k.source == "Ogame"
-        ]
-    ):
+        if (
+            k.source == "BattleSim"
+            and k.created_at.replace(tzinfo=timezone.utc)
+            >= datetime.now(timezone.utc) - timedelta(days=7)
+        )
+    ]
+    if recent_battle_sims:
+        return max(recent_battle_sims, key=lambda k: k.created_at)
+
+    ogame_keys = [
+        k for k in player_model.report_api_keys if k.source == "Ogame"
+    ]
+    if not ogame_keys:
         return None
 
-    totals = [(k, sum(s.count for s in k.ships)) for k in ogame_keys]
-    threshold = max(total for _, total in totals) * 0.8
-    eligible = [k for k, total in totals if total >= threshold]
-
-    return max(eligible or ogame_keys, key=lambda k: k.created_at)
+    return max(
+        ogame_keys,
+        key=lambda k: (k.military_ships_total, k.created_at),
+    )
 
 
 def get_player_info(ogame_id):
@@ -576,6 +643,7 @@ def get_player_info(ogame_id):
         session.expunge(player_model)
 
     alliance = player_data.get("alliance")
+
     return OgamePlayer(
         player_model=player_model,
         alliance=(
