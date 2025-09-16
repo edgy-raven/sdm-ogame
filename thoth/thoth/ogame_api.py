@@ -2,8 +2,10 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
+import math
 import xml.etree.ElementTree as ET
 
+from IPython import embed
 import discord
 import requests
 from sqlalchemy.orm import selectinload
@@ -177,9 +179,13 @@ class OgamePlayer:
                     planet_name += " 🔴"
             active.append(f"{planet_name} `{coords}`{moon_emoji}")
 
-        destroyed = [f"`{pl.coord_str()}`" for pl in planets if pl.destroyed]
+        header = f"Planets ({len(planets)}"
+        if report and report.astrophysics:
+            header += f" / {1 + math.ceil(report.astrophysics.level / 2)}"
+        header += ")"
+        embed.add_field(name=header, value="\n".join(active), inline=False)
 
-        embed.add_field(name="Planets", value="\n".join(active), inline=False)
+        destroyed = [f"`{pl.coord_str()}`" for pl in planets if pl.destroyed]
         if destroyed:
             embed.add_field(
                 name="Destroyed Planets",
@@ -195,10 +201,15 @@ class OgamePlayer:
             f"{f' - {self.alliance}' if self.alliance else ''}",
             color=discord.Color.blue(),
         )
+        if self.player_model.discord_user:
+            embed.add_field(
+                name="Linked Discord User",
+                value=f"<@{self.player_model.discord_user.discord_id}>",
+                inline=False,
+            )
 
         last_hs = self.player_model.last_highscore
         second_hs = self.player_model.second_last_highscore
-
         embed.add_field(
             name="Overall Rank",
             value=f"**{last_hs.total_rk}** {last_hs.total_pt:,}"
@@ -264,7 +275,11 @@ def get_player_info(ogame_id):
                 selectinload(data_models.Player.report_api_keys).selectinload(
                     data_models.ReportAPIKey.resources
                 ),
+                selectinload(data_models.Player.report_api_keys).selectinload(
+                    data_models.ReportAPIKey.astrophysics
+                ),
                 selectinload(data_models.Player.highscores),
+                selectinload(data_models.Player.discord_user),
             )
             .get(ogame_id)
         )

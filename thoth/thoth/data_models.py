@@ -41,8 +41,13 @@ class Player(Base):
 
     planets = relationship("Planet", back_populates="player")
     report_api_keys = relationship("ReportAPIKey")
-
     highscores = relationship(HighScore, order_by=HighScore.created_at.desc())
+    discord_user = relationship(
+        "DiscordUser",
+        back_populates="player",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
 
     @hybrid_property
     def last_highscore(self):
@@ -106,8 +111,9 @@ class DiscordUser(Base):
         unique=True,
         nullable=False,
     )
-
-    player = relationship("Player", uselist=False)
+    player = relationship(
+        "Player", back_populates="discord_user", uselist=False
+    )
 
 
 class ReportAPIKey(Base, CoordinatesMixin):
@@ -121,6 +127,15 @@ class ReportAPIKey(Base, CoordinatesMixin):
 
     ships = relationship("Ships", cascade="all, delete-orphan")
     techs = relationship("Techs", cascade="all, delete-orphan")
+    astrophysics = relationship(
+        "Techs",
+        primaryjoin=(
+            "and_(ReportAPIKey.report_api_key==Techs.report_api_key, "
+            "Techs.tech_type==124)"
+        ),
+        uselist=False,
+        viewonly=True,
+    )
     resources = relationship(
         "Resources", cascade="all, delete-orphan", uselist=False
     )

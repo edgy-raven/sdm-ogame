@@ -12,8 +12,8 @@ class MembershipError(Exception):
 def discord_to_ogame_id(discord_id):
     with data_models.Session() as session:
         discord_user_model = session.get(data_models.DiscordUser, discord_id)
-        if discord_user_model:
-            return discord_user_model.ogame_id
+        if discord_user_model and discord_user_model.player:
+            return discord_user_model.player.ogame_id
         return None
 
 
