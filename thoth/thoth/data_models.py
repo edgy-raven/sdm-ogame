@@ -16,6 +16,10 @@ from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 Base = declarative_base()
 
+# Set by initialize_connection()
+engine = None
+Session = None
+
 
 class HighScore(Base):
     __tablename__ = "highscore"
@@ -110,7 +114,7 @@ class ReportAPIKey(Base, CoordinatesMixin):
     __tablename__ = "report_api_keys"
 
     report_api_key = Column(String, primary_key=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now(timezone.utc))
     ogame_id = Column(Integer, ForeignKey("players.ogame_id"), nullable=False)
     source = Column(String, nullable=False)
     from_moon = Column(Boolean, default=False)
@@ -173,8 +177,10 @@ class ReportAPIKey(Base, CoordinatesMixin):
             days = seconds // 86400
             hours = (seconds % 86400) // 3600
             if hours:
-                ago = f"{days} day{'s' if days != 1 else ''} "
-                f"{hours} hour{'s' if hours != 1 else ''} ago"
+                ago = (
+                    f"{days} day{'s' if days != 1 else ''} "
+                    f"{hours} hour{'s' if hours != 1 else ''} ago"
+                )
             else:
                 ago = f"{days} day{'s' if days != 1 else ''} ago"
 
@@ -219,7 +225,9 @@ class Resources(Base):
     deuterium = Column(Integer, default=0, nullable=False)
 
 
-engine = create_engine("sqlite:///ogame_players.db")
-Base.metadata.create_all(engine)
+def initialize_connection(db_url):
+    global engine, Session  # pylint: disable=global-statement
 
-Session = sessionmaker(bind=engine)
+    engine = create_engine(db_url)
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)

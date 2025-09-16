@@ -1,5 +1,7 @@
 keyring.json
 ogame_players.db
+thoth/scripts/*.sh
+logs/
 __pycache__
 *.pyc
 *.code-workspace

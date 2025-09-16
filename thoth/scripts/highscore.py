@@ -1,9 +1,11 @@
+import argparse
+import json
 import requests
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func
 
-from thoth.data_models import HighScore, Session
+from thoth import data_models
 from thoth.ogame_api import bulk_update_players
 
 SCORE_TYPES = {
@@ -41,8 +43,10 @@ def snapshot():
             if rk_field:
                 results[ogame_id][rk_field] = pos
 
-    with Session() as session:
-        max_db_ts = session.query(func.max(HighScore.created_at)).scalar()
+    with data_models.Session() as session:
+        max_db_ts = session.query(
+            func.max(data_models.HighScore.created_at)
+        ).scalar()
         if max_db_ts is not None:
             max_db_ts = max_db_ts.replace(tzinfo=timezone.utc)
             if timestamp <= max_db_ts or (timestamp - max_db_ts) < timedelta(
@@ -52,12 +56,26 @@ def snapshot():
                 return
 
     bulk_update_players()
-    with Session() as session:
+    with data_models.Session() as session:
         for ogame_id, fields in results.items():
-            hs = HighScore(ogame_id=ogame_id, created_at=timestamp, **fields)
+            hs = data_models.HighScore(
+                ogame_id=ogame_id, created_at=timestamp, **fields
+            )
             session.add(hs)
         session.commit()
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--keyring",
+        type=str,
+        default="keyring.json",
+        help="Path to keyring.json file (default: keyring.json)",
+    )
+    args = parser.parse_args()
+
+    with open(args.keyring, "r") as f:
+        keyring = json.load(f)
+    data_models.initialize_connection(keyring["db_url"])
     snapshot()
