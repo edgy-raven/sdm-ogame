@@ -136,6 +136,15 @@ class ReportAPIKey(Base, CoordinatesMixin):
         uselist=False,
         viewonly=True,
     )
+    hyperspace_technology = relationship(
+        "Techs",
+        primaryjoin=(
+            "and_(ReportAPIKey.report_api_key==Techs.report_api_key, "
+            "Techs.tech_type==114)"
+        ),
+        uselist=False,
+        viewonly=True,
+    )
     resources = relationship(
         "Resources", cascade="all, delete-orphan", uselist=False
     )

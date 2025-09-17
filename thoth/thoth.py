@@ -376,10 +376,67 @@ async def convert(
     if embedded_currency:
         from_currency = embedded_currency
     converted = int(round(from_currency.convert(amount, to_currency)))
-    await interaction.response.send_message(
-        f"💱 {amount:,.0f} {from_currency.display} = "
-        f"{converted:,.0f} {to_currency.display}"
+
+    embed = discord.Embed(
+        title="💱 Resource Conversion",
+        description=f"{amount:,.0f} {from_currency.display}"
+        f" = {converted:,.0f} {to_currency.display}",
+        color=discord.Color.blue(),
     )
+    ogame_id = members.discord_to_ogame_id(interaction.user.id)
+    trade.add_cargo_requirements_to_discord_embed(converted, ogame_id, embed)
+    await interaction.response.send_message(embed=embed)
+
+
+@tree.command(
+    name="expedition_calculator",
+    description="Calculate large cargos needed for an expedition",
+    guild=discord.Object(id=SDM_GUILD_ID),
+)
+@app_commands.describe(
+    res_find="Enhanced Sensor Technology bonus (%)",
+    ship_find="Telekinetic Tractor Beam bonus (%)",
+    small="Number of small cargos you have",
+    pathfinder="Number of pathfinders you have",
+)
+async def expedition_calculator(
+    interaction: discord.Interaction,
+    res_find: float,
+    ship_find: float,
+    small: int = 0,
+    pathfinder: int = 1,
+):
+    ogame_id = members.discord_to_ogame_id(interaction.user.id)
+
+    try:
+        needed_large = trade.expedition_cargos(
+            ogame_id, res_find, ship_find, small, pathfinder
+        )
+    except ValueError as e:
+        await interaction.response.send_message(f"⚠️ {e}", ephemeral=True)
+        return
+
+    fleet_lines = []
+    if small:
+        fleet_lines.append(f"• Small: {small}")
+    if pathfinder:
+        fleet_lines.append(f"• Pathfinder: {pathfinder}")
+    embed = discord.Embed(
+        title="🚀 Expedition Cargo Calculation",
+        description=(
+            (
+                (f"Your fleet:\n" + "\n".join(fleet_lines) + "\n\n")
+                if fleet_lines
+                else ""
+            )
+            + f"With **Enhanced Sensor Technology: {res_find}%** and "
+            f"**Telekinetic Tractor Beam: {ship_find}%**, you need "
+            f"**{needed_large:,} additional large cargos** to carry the "
+            "maximum resources."
+        ),
+        color=discord.Color.blue(),
+    )
+    await interaction.response.send_message(embed=embed)
 
 
 client.run(BOT_TOKEN)
