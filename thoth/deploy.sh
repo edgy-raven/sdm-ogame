@@ -11,7 +11,7 @@ fi
 ssh "$(jq -r '.deploy_location' 'keyring.json')" << 'EOF'
 
 cd ~/sdm-ogame/thoth
-git pull origin main
+git pull origin main --rebase
 
 screen -S "thoth_bot" -X quit 2>/dev/null || true
 

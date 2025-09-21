@@ -175,6 +175,7 @@ def add_key(key, player_id=None, force=False):
     key = key.replace("💯", ":100:")
     if key.startswith("sr-"):
         parse_ogame_sr(key, force=force)
+        source = "Ogame"
     else:
         if player_id is None:
             raise ReportAPIException(
@@ -182,7 +183,8 @@ def add_key(key, player_id=None, force=False):
                 "player_id is required for BattleSim keys",
             )
         parse_battlesim_api(key, player_id, force=force)
-    return key
+        source = "BattleSim"
+    return key, source
 
 
 def delete_key(key, delete_planet=False):

@@ -1,12 +1,12 @@
 import argparse
-import asyncio
 import json
 
 import discord
 from discord import app_commands
 from discord.ui import View, Button
 
-from thoth import data_models, ogame_api, members, ptre, reports, trade
+from thoth import cargo, data_models, ogame_api, members, ptre, reports
+from thoth_interactions import trade
 
 
 parser = argparse.ArgumentParser()
@@ -285,7 +285,11 @@ async def add_key(
                     ephemeral=True,
                 )
                 return
-        api_key = reports.add_key(api_key, player_id=ogame_id, force=force)
+        api_key, source = reports.add_key(
+            api_key, player_id=ogame_id, force=force
+        )
+        if source == "Ogame":
+            ptre.push_to_ptre(api_key)
         r = reports.ReportWithDelta(api_key)
         player_name = reports.get_player_name_from_api_key(api_key)
         if r.is_sr_report and r.last_report and not r.has_delta:
@@ -348,44 +352,53 @@ async def delete_key(
 
 
 @tree.command(
-    name="convert",
-    description="Convert between resources for trades",
+    name="trade",
+    description="Offer a trade to alliance members",
     guild=discord.Object(id=SDM_GUILD_ID),
 )
 @app_commands.describe(
-    amount="The amount to convert (supports shorthands, e.g.,"
-    "2kk deut = 2,000,000 deuterium)",
-    to_currency="The currency you want to convert to (default: crystal)",
-    from_currency="The currency you are converting from (default: deuterium)",
+    location="Where the resources are located",
+    offer_amount="Sale amount (supports embedded currency, e.g., 2kk deut)",
+    from_currency="Currency you offer",
+    to_currency="Currency you want in return",
 )
-async def convert(
+async def start_trade(
     interaction: discord.Interaction,
-    amount: str,
-    to_currency: trade.Currency = trade.Currency.crystal,
+    location: str,
+    offer_amount: str,
     from_currency: trade.Currency = trade.Currency.deuterium,
+    to_currency: trade.Currency = trade.Currency.crystal,
 ):
     try:
-        amount, embedded_currency = trade.parse_amount_and_currency(amount)
+        offer_value, embedded_currency = trade.parse_amount_and_currency(
+            offer_amount
+        )
     except ValueError:
         await interaction.response.send_message(
-            "❌ Invalid amount format.",
-            ephemeral=True,
+            "❌ Invalid amount format.", ephemeral=True
         )
         return
 
-    if embedded_currency:
-        from_currency = embedded_currency
-    converted = int(round(from_currency.convert(amount, to_currency)))
-
-    embed = discord.Embed(
-        title="💱 Resource Conversion",
-        description=f"{amount:,.0f} {from_currency.display}"
-        f" = {converted:,.0f} {to_currency.display}",
-        color=discord.Color.blue(),
+    offer_currency = embedded_currency if embedded_currency else from_currency
+    converted_value = int(
+        round(offer_currency.convert(offer_value, to_currency))
     )
-    ogame_id = members.discord_to_ogame_id(interaction.user.id)
-    trade.add_cargo_requirements_to_discord_embed(converted, ogame_id, embed)
-    await interaction.response.send_message(embed=embed)
+    location = trade.normalize_location(location)
+    if not location:
+        await interaction.response.send_message(
+            "❌ Invalid location. Use x:y:z or x.y.z, optionally [M/Moon].",
+            ephemeral=True,
+        )
+        return
+    view = trade.TradeView(
+        seller_id=interaction.user.id,
+        offer_amount=int(offer_value),
+        offer_currency=offer_currency,
+        want_amount=converted_value,
+        want_currency=to_currency,
+        location=location,
+    )
+    await interaction.response.send_message(embed=view._make_embed(), view=view)
 
 
 @tree.command(
@@ -407,15 +420,13 @@ async def expedition_calculator(
     pathfinder: int = 1,
 ):
     ogame_id = members.discord_to_ogame_id(interaction.user.id)
-
     try:
-        needed_large = trade.expedition_cargos(
+        needed_large = cargo.expedition_cargos(
             ogame_id, res_find, ship_find, small, pathfinder
         )
     except ValueError as e:
         await interaction.response.send_message(f"⚠️ {e}", ephemeral=True)
         return
-
     fleet_lines = []
     if small:
         fleet_lines.append(f"• Small: {small}")

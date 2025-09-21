@@ -60,6 +60,20 @@ def sync_ptre_sr(player_id):
         return
 
 
+def push_to_ptre(sr_id):
+    resp = requests.get(
+        "https://ptre.chez.gg/scripts/oglight_import.php",
+        params={
+            "tool": TOOL,
+            "team_key": TEAM_KEY,
+            "sr_id": sr_id,
+        },
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 def initialize_connection(team_key):
     global TEAM_KEY  # pylint: disable=global-statement
     TEAM_KEY = team_key
