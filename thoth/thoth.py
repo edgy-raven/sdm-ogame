@@ -356,49 +356,18 @@ async def delete_key(
     description="Offer a trade to alliance members",
     guild=discord.Object(id=SDM_GUILD_ID),
 )
-@app_commands.describe(
-    location="Where the resources are located",
-    offer_amount="Sale amount (supports embedded currency, e.g., 2kk deut)",
-    from_currency="Currency you offer",
-    to_currency="Currency you want in return",
+@app_commands.describe(direction="Trade direction: buy or sell")
+@app_commands.choices(
+    direction=[
+        app_commands.Choice(name="Buy", value="buy"),
+        app_commands.Choice(name="Sell", value="sell"),
+    ]
 )
 async def start_trade(
-    interaction: discord.Interaction,
-    location: str,
-    offer_amount: str,
-    from_currency: trade.Currency = trade.Currency.deuterium,
-    to_currency: trade.Currency = trade.Currency.crystal,
+    interaction: discord.Interaction, direction: app_commands.Choice[str]
 ):
-    try:
-        offer_value, embedded_currency = trade.parse_amount_and_currency(
-            offer_amount
-        )
-    except ValueError:
-        await interaction.response.send_message(
-            "❌ Invalid amount format.", ephemeral=True
-        )
-        return
-
-    offer_currency = embedded_currency if embedded_currency else from_currency
-    converted_value = int(
-        round(offer_currency.convert(offer_value, to_currency))
-    )
-    location = trade.normalize_location(location)
-    if not location:
-        await interaction.response.send_message(
-            "❌ Invalid location. Use x:y:z or x.y.z, optionally [M/Moon].",
-            ephemeral=True,
-        )
-        return
-    view = trade.TradeView(
-        seller_id=interaction.user.id,
-        offer_amount=int(offer_value),
-        offer_currency=offer_currency,
-        want_amount=converted_value,
-        want_currency=to_currency,
-        location=location,
-    )
-    await interaction.response.send_message(embed=view._make_embed(), view=view)
+    buy = direction.value == "buy"
+    await interaction.response.send_modal(trade.TradeModal(buy=buy))
 
 
 @tree.command(
